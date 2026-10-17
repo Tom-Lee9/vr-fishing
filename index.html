@@ -28,7 +28,7 @@
   <p>Turn your phone sideways. Tap Start, allow motion access, then slide it into the headset.</p>
   <button id="go" disabled>Loading…</button>
   <p id="msg"></p>
-  <p>Hold the screen (or the headset button) to charge a cast, let go to throw it where you're looking. Tap to reel in. Two-finger tap re-centres the view.</p>
+  <p>Hold the screen (or headset button) to charge a cast, let go to throw it where you're looking. When the bobber gets pulled under, tap fast to hook the fish. Then hold to reel in, and let go when the bar goes red or the line snaps. Hold with no fish on to wind back in. Two-finger tap re-centres.</p>
 </div>
 <div id="divider"></div>
 
@@ -167,26 +167,61 @@ const lineGeo = new THREE.BufferGeometry();
 lineGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(LINE_POINTS * 3), 3));
 scene.add(new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0xffffff })));
 
-// ---------- Casting ----------
-// state is one of: ready (bobber at the rod), charging (holding), flying, floating, reeling
+// ---------- Fishing ----------
+// state is one of:
+//   ready     bobber hanging at the rod
+//   charging  holding to power up a cast
+//   flying    bobber in the air
+//   floating  bobber on the water waiting for a bite (hold to wind it back in)
+//   fighting  a fish is hooked (hold to reel, let go when the line gets too tight)
 let state = 'ready';
 let playing = false;   // true once Start has been pressed
+let held = false;      // is the screen / button being held down right now?
 let power = 0, chargeStart = 0;
 let flyFrom = new THREE.Vector3(), flyTo = new THREE.Vector3(), flyStart = 0, flyTime = 1, flyHeight = 2;
 const tipPos = new THREE.Vector3();
 
-// Power bar, floating just below the middle of your view
+// Bar floating just below the middle of your view: cast power, or line tension in a fight
 const meter = new THREE.Group();
 meter.position.set(0, -0.3, -1.2);
-const meterBg = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.07), new THREE.MeshBasicMaterial({ color: 0x10202c, depthTest: false }));
+// (transparent: true so they're drawn after the see-through water, not underneath it)
+const meterBg = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.07), new THREE.MeshBasicMaterial({ color: 0x10202c, depthTest: false, transparent: true }));
 const fillGeo = new THREE.PlaneGeometry(0.6, 0.05);
 fillGeo.translate(0.3, 0, 0);          // so it grows from the left edge
-const meterFill = new THREE.Mesh(fillGeo, new THREE.MeshBasicMaterial({ color: 0x4cd964, depthTest: false }));
+const meterFill = new THREE.Mesh(fillGeo, new THREE.MeshBasicMaterial({ color: 0x4cd964, depthTest: false, transparent: true }));
 meterFill.position.set(-0.3, 0, 0.001);
 meter.add(meterBg, meterFill);
 meter.renderOrder = meterBg.renderOrder = meterFill.renderOrder = 10;
 meter.visible = false;
 head.add(meter);
+function setMeter(v, warn) {
+  meterFill.scale.x = Math.max(v, 0.01);
+  // Green normally; for tension it goes yellow then red as it gets close to snapping
+  meterFill.material.color.set(!warn || v < 0.5 ? 0x4cd964 : v < 0.8 ? 0xffcc00 : 0xff3b30);
+}
+
+// Message sign: short text that pops up in front of you for a few seconds
+const msgCanvas = document.createElement('canvas');
+msgCanvas.width = 512; msgCanvas.height = 128;
+const mctx = msgCanvas.getContext('2d');
+const msgTex = new THREE.CanvasTexture(msgCanvas);
+msgTex.colorSpace = THREE.SRGBColorSpace;
+const msgSign = new THREE.Mesh(new THREE.PlaneGeometry(0.8, 0.2), new THREE.MeshBasicMaterial({ map: msgTex, transparent: true, depthTest: false }));
+msgSign.position.set(0, 0.2, -1.4);
+msgSign.renderOrder = 10;
+msgSign.visible = false;
+head.add(msgSign);
+let msgUntil = 0;
+function say(text, secs) {
+  mctx.clearRect(0, 0, 512, 128);
+  mctx.fillStyle = 'rgba(16,32,44,0.85)'; mctx.fillRect(0, 0, 512, 128);
+  mctx.fillStyle = '#fff'; mctx.font = 'bold 52px sans-serif';
+  mctx.textAlign = 'center'; mctx.textBaseline = 'middle';
+  mctx.fillText(text, 256, 66);
+  msgTex.needsUpdate = true;
+  msgSign.visible = true;
+  msgUntil = clock.getElapsedTime() + secs;
+}
 
 // Ring on the water: shows where you're aiming, and doubles as the splash
 const ringMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.7 });
@@ -199,6 +234,11 @@ const splash = new THREE.Mesh(ringGeo, ringMat.clone());
 splash.visible = false;
 let splashStart = 0;
 scene.add(splash);
+function splashAt(pos, t) {
+  splash.position.set(pos.x, 0.05, pos.z);
+  splash.visible = true;
+  splashStart = t;
+}
 
 // Where a cast with this much power would land: straight ahead of where you're looking
 function castTarget(p, out) {
@@ -208,14 +248,53 @@ function castTarget(p, out) {
   return out;
 }
 
+// ---------- Bites ----------
+// After a random wait the bobber twitches a few times (nibbles), then gets
+// pulled right under (the bite). Press during the bite to hook the fish.
+const BITE_WINDOW = 1.2; // seconds you get to react
+let nextNibble = 0, nibblesLeft = 0, nibbleStart = -10, biteStart = -10;
+function waitForFish(t) {
+  nextNibble = t + 3 + Math.random() * 7;
+  nibblesLeft = 1 + Math.floor(Math.random() * 3);
+  biteStart = -10;
+}
+
+// ---------- The fight ----------
+// tension goes up while you reel against a pulling fish, and down when you let go.
+// It hits 1 = the line snaps. (Later, the reel's motor will push back with this.)
+let tension = 0, slackSince = 0;
+const fish = { weight: 0, strength: 0, stamina: 1, dist: 0, angle: 0, surgeUntil: 0, nextSurge: 0, wiggle: 0 };
+function hookFish(t) {
+  fish.weight = 0.3 + Math.random() ** 2 * 4.5;       // kg: mostly small, sometimes a big one
+  fish.strength = 0.4 + (fish.weight / 4.8) * 0.6;      // 0.4 for a tiddler, 1 for a monster
+  fish.stamina = 1;
+  const dx = bobber.position.x - head.position.x, dz = bobber.position.z - head.position.z;
+  fish.dist = Math.hypot(dx, dz);
+  fish.angle = Math.atan2(-dx, -dz);
+  fish.nextSurge = t + 1 + Math.random() * 2;
+  fish.surgeUntil = 0;
+  fish.wiggle = Math.random() * 10;
+  tension = 0.2;
+  slackSince = t;
+  state = 'fighting';
+  say('Fish on!', 1.5);
+}
+function endFight(t, text, next) {
+  say(text, 3);
+  tension = 0;
+  state = next;
+  if (next === 'floating') { bobber.position.y = 0; waitForFish(t); }
+}
+
 function press(now) {
   if (!playing) return;
-  if (state === 'ready') { state = 'charging'; chargeStart = now; power = 0; meter.visible = aimRing.visible = true; }
-  else if (state === 'floating') state = 'reeling';
+  held = true;
+  if (state === 'ready') { state = 'charging'; chargeStart = now; power = 0; }
+  else if (state === 'floating' && now - biteStart < BITE_WINDOW) hookFish(now);
 }
 function release(now) {
+  held = false;
   if (state !== 'charging') return;
-  meter.visible = aimRing.visible = false;
   flyFrom.copy(tipPos);
   castTarget(power, flyTo);
   const dist = flyFrom.distanceTo(flyTo);
@@ -225,9 +304,9 @@ function release(now) {
   state = 'flying';
 }
 
-// Touch: one finger = cast/reel, two fingers = re-centre
+// Touch: one finger = cast/hook/reel, two fingers = re-centre
 addEventListener('touchstart', e => {
-  if (e.touches.length >= 2) { recentre(); if (state === 'charging') { state = 'ready'; meter.visible = aimRing.visible = false; } return; }
+  if (e.touches.length >= 2) { recentre(); if (state === 'charging') state = 'ready'; return; }
   press(clock.getElapsedTime());
 });
 addEventListener('touchend', e => { if (e.touches.length === 0) release(clock.getElapsedTime()); });
@@ -252,6 +331,9 @@ function updateFishing(t) {
   const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(head.quaternion);
   body.rotation.y = Math.atan2(-fwd.x, -fwd.z);
   body.position.copy(head.position);
+  // Rod dips toward the fish as the line gets tight, and shakes on a surge
+  const surging = state === 'fighting' && t < fish.surgeUntil;
+  rod.rotation.x = -0.8 - tension * 0.3 + (surging ? Math.sin(t * 40) * 0.02 : 0);
   body.updateMatrixWorld();
   rodTip.getWorldPosition(tipPos);
 
@@ -261,7 +343,7 @@ function updateFishing(t) {
   }
   if (state === 'charging') {
     power = Math.min(1, (t - chargeStart) / 1.2); // full power after 1.2 s
-    meterFill.scale.x = Math.max(power, 0.01);
+    setMeter(power, false);
     castTarget(power, aimRing.position);
     aimRing.position.y = 0.05;
   }
@@ -271,21 +353,63 @@ function updateFishing(t) {
     bobber.position.y += 4 * flyHeight * u * (1 - u); // arc up and back down
     if (u >= 1) {
       state = 'floating';
-      splash.position.copy(flyTo); splash.visible = true; splashStart = t;
+      splashAt(flyTo, t);
+      waitForFish(t);
     }
   }
   if (state === 'floating') {
-    bobber.position.y = waveY(bobber.position.x, bobber.position.z, t) + 0.02;
+    let y = waveY(bobber.position.x, bobber.position.z, t) + 0.02;
+    if (held) {
+      // Winding the empty line back in
+      const toTip = new THREE.Vector3().subVectors(tipPos, bobber.position);
+      toTip.y = 0;
+      if (toTip.length() < 1.2) state = 'ready';
+      else bobber.position.addScaledVector(toTip.normalize(), 4 * dt);
+      nextNibble = Math.max(nextNibble, t + 2); // fish won't bite a moving bobber
+      biteStart = -10;
+    } else if (biteStart > 0) {
+      if (t - biteStart < BITE_WINDOW) y -= 0.25; // pulled under!
+      else { say('Missed it!', 1.5); waitForFish(t); }
+    } else if (t > nextNibble) {
+      if (nibblesLeft > 0) { nibblesLeft--; nibbleStart = t; nextNibble = t + 0.8 + Math.random() * 1.5; }
+      else { biteStart = t; splashAt(bobber.position, t); }
+    }
+    if (t - nibbleStart < 0.25) y -= 0.07; // little twitch
+    bobber.position.y = y;
     sag = 0.4;
   }
-  if (state === 'reeling') {
-    // Temporary auto-reel; step 3 replaces this with real reeling
-    const toTip = new THREE.Vector3().subVectors(tipPos, bobber.position);
-    const step = 8 * dt; // 8 m per second
-    if (toTip.length() < 0.7) state = 'ready';
-    else bobber.position.addScaledVector(toTip.normalize(), step);
-    sag = 0.2;
+  if (state === 'fighting') {
+    if (t > fish.nextSurge) {
+      fish.surgeUntil = t + 0.8 + Math.random();
+      fish.nextSurge = fish.surgeUntil + 2 + Math.random() * 3;
+      splashAt(bobber.position, t);
+    }
+    // How hard the fish pulls right now: harder in a surge, weaker as it tires
+    const pull = fish.strength * (surging ? 1 : 0.45) * (0.4 + 0.6 * fish.stamina);
+    if (held) {
+      fish.dist -= 2.2 * (1 - pull * 0.6) * dt;
+      tension += (pull * 0.9 - 0.15) * dt;
+      fish.stamina = Math.max(0, fish.stamina - 0.07 * dt);
+    } else {
+      fish.dist += pull * 1.2 * dt;  // fish swims off and pulls line out
+      tension -= 0.5 * dt;
+    }
+    tension = Math.max(0, tension);
+    if (held || tension > 0.05) slackSince = t;
+    // Fish swims side to side
+    fish.angle += Math.sin(t * 0.8 + fish.wiggle) * 0.08 * fish.strength * (surging ? 3 : 1) * dt;
+    bobber.position.set(head.position.x - Math.sin(fish.angle) * fish.dist, -0.15, head.position.z - Math.cos(fish.angle) * fish.dist);
+    bobber.position.z = Math.min(bobber.position.z, -2.5);
+    setMeter(tension, true);
+
+    if (tension >= 1) endFight(t, 'Snap! Line broke', 'ready');
+    else if (fish.dist > 35) endFight(t, 'It got away!', 'floating');
+    else if (t - slackSince > 4) endFight(t, 'Slack line, it got off!', 'floating');
+    else if (fish.dist < 2.5) endFight(t, `Caught! ${fish.weight.toFixed(1)} kg`, 'ready');
   }
+  meter.visible = state === 'charging' || state === 'fighting';
+  aimRing.visible = state === 'charging';
+  if (msgSign.visible && t > msgUntil) msgSign.visible = false;
 
   // Splash ring spreads out and fades
   if (splash.visible) {
@@ -306,6 +430,105 @@ function updateFishing(t) {
   }
   lineGeo.attributes.position.needsUpdate = true;
   lineGeo.computeBoundingSphere();
+}
+
+// ---------- Wildlife ----------
+// Fish shadows: a flat fish shape lying on the water, dark and see-through
+const fishShape = new THREE.Shape();
+fishShape.absellipse(0, 0, 0.5, 0.18, 0, Math.PI * 2);
+const tailShape = new THREE.Shape([new THREE.Vector2(-0.45, 0), new THREE.Vector2(-0.75, 0.16), new THREE.Vector2(-0.75, -0.16)]);
+const fishGeo = new THREE.ShapeGeometry([fishShape, tailShape]);
+fishGeo.rotateX(-Math.PI / 2); // lie flat, nose pointing along +x
+function shadowMat() {
+  // polygonOffset draws it on top of the water instead of flickering through it
+  return new THREE.MeshBasicMaterial({ color: 0x06222c, transparent: true, opacity: 0, depthWrite: false,
+    polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 });
+}
+const swimmers = [];
+function spawnSwimmer(obj, mat, t, speed, life) {
+  // Start 8-30 m out somewhere in front of you, heading in a random direction
+  const a = (Math.random() - 0.5) * 2.2;
+  const r = 8 + Math.random() * 22;
+  obj.position.set(-Math.sin(a) * r, 0, Math.min(-Math.cos(a) * r, -6));
+  const heading = Math.random() * Math.PI * 2;
+  scene.add(obj);
+  swimmers.push({ obj, mat, born: t, life, speed, heading, turn: (Math.random() - 0.5) * 0.3 });
+}
+function spawnSchool(t) {
+  const group = new THREE.Group(), mat = shadowMat();
+  const n = 8 + Math.floor(Math.random() * 8);
+  for (let i = 0; i < n; i++) {
+    const m = new THREE.Mesh(fishGeo, mat);
+    m.renderOrder = 1; // after the water
+    m.scale.setScalar(0.35 + Math.random() * 0.15);
+    m.position.set((Math.random() - 0.5) * 2.5, 0, (Math.random() - 0.5) * 2.5);
+    m.userData.phase = Math.random() * 6;
+    group.add(m);
+  }
+  spawnSwimmer(group, mat, t, 1.5, 18);
+}
+function spawnBigFish(t) {
+  const group = new THREE.Group(), mat = shadowMat();
+  const m = new THREE.Mesh(fishGeo, mat);
+  m.renderOrder = 1; // after the water
+  m.scale.setScalar(2.2);
+  m.userData.phase = 0;
+  group.add(m);
+  spawnSwimmer(group, mat, t, 0.7, 25);
+}
+
+// Ducks paddling slow circles out on the lake
+const duckBodyMat = new THREE.MeshLambertMaterial({ color: 0x8a6a4a });
+const duckHeadMat = new THREE.MeshLambertMaterial({ color: 0x1e5b2e });
+const duckBeakMat = new THREE.MeshLambertMaterial({ color: 0xf0a020 });
+const ducks = [];
+for (let i = 0; i < 7; i++) {
+  const d = new THREE.Group();
+  const b = new THREE.Mesh(new THREE.SphereGeometry(0.3, 12, 8), duckBodyMat);
+  b.scale.set(1.4, 0.7, 0.9); b.position.y = 0.12;
+  const h = new THREE.Mesh(new THREE.SphereGeometry(0.14, 10, 8), duckHeadMat);
+  h.position.set(0.32, 0.42, 0);
+  const k = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.16, 6), duckBeakMat);
+  k.rotation.z = -Math.PI / 2; k.position.set(0.5, 0.4, 0);
+  d.add(b, h, k);
+  d.scale.setScalar(1.5);
+  // Somewhere 25-42 m out in front (the shore starts around 45 m), not on the island
+  let hx, hz;
+  do {
+    const a = (rand() - 0.5) * 2.6, r = 25 + rand() * 17;
+    hx = -Math.sin(a) * r; hz = -Math.cos(a) * r;
+  } while (Math.hypot(hx + 18, hz + 35) < 11);
+  scene.add(d);
+  ducks.push({ d, hx, hz, phase: rand() * 6, spin: (rand() < 0.5 ? -1 : 1) * (0.05 + rand() * 0.06), r: 1 + rand() * 2 });
+}
+
+let nextSchool = 5, nextBig = 20, lastWildT = 0;
+function updateWildlife(t) {
+  const dt = Math.min(0.1, t - lastWildT);
+  lastWildT = t;
+  if (t > nextSchool) { spawnSchool(t); nextSchool = t + 15 + Math.random() * 25; }
+  if (t > nextBig) { spawnBigFish(t); nextBig = t + 30 + Math.random() * 40; }
+
+  for (let i = swimmers.length - 1; i >= 0; i--) {
+    const s = swimmers[i], o = s.obj, age = t - s.born;
+    s.heading += s.turn * dt;
+    if (o.position.z > -5) s.heading = Math.PI / 2 + (Math.random() - 0.5); // too close to the dock: turn back out
+    o.rotation.y = s.heading;
+    o.position.x += Math.cos(s.heading) * s.speed * dt;
+    o.position.z -= Math.sin(s.heading) * s.speed * dt;
+    o.position.y = waveY(o.position.x, o.position.z, t) + 0.02;
+    for (const m of o.children) m.rotation.y = Math.sin(t * 6 + m.userData.phase) * 0.2; // tail wiggle
+    // Fade in over 2 s, fade out over the last 2 s
+    s.mat.opacity = 0.5 * Math.max(0, Math.min(1, age / 2, (s.life - age) / 2));
+    if (age > s.life) { scene.remove(o); s.mat.dispose(); swimmers.splice(i, 1); }
+  }
+
+  for (const k of ducks) {
+    const p = k.phase + t * k.spin;
+    k.d.position.set(k.hx + Math.cos(p) * k.r, 0, k.hz - Math.sin(p) * k.r);
+    k.d.position.y = waveY(k.d.position.x, k.d.position.z, t);
+    k.d.rotation.y = p + Math.sign(k.spin) * Math.PI / 2; // face the way it's paddling
+  }
 }
 
 // ---------- Joy-Con / gamepad test board ----------
@@ -441,6 +664,7 @@ function frame() {
   head.updateMatrixWorld();
   pollPad(t);
   updateFishing(t);
+  updateWildlife(t);
   drawBoard();
 
   // Render twice: left half of the screen for the left eye, right half for the right

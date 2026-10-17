@@ -28,7 +28,7 @@
   <p>Turn your phone sideways. Tap Start, allow motion access, then slide it into the headset.</p>
   <button id="go" disabled>Loading…</button>
   <p id="msg"></p>
-  <p>Tap the screen any time to re-centre the view.</p>
+  <p>Hold the screen (or the headset button) to charge a cast, let go to throw it where you're looking. Tap to reel in. Two-finger tap re-centres the view.</p>
 </div>
 <div id="divider"></div>
 
@@ -131,13 +131,182 @@ island.position.set(-18, 0, -35);
 scene.add(island);
 for (let i = 0; i < 6; i++) tree(-18 + (rand() - .5) * 8, -35 + (rand() - .5) * 8, 0.9 + rand() * 0.5);
 
-// A bobber floating close-ish in front of you, to judge depth
+// The bobber (starts hanging off the rod tip; see Casting below)
 const bobber = new THREE.Group();
 const top = new THREE.Mesh(new THREE.SphereGeometry(0.12, 16, 12, 0, Math.PI * 2, 0, Math.PI / 2), new THREE.MeshLambertMaterial({ color: 0xff3030 }));
 const bot = new THREE.Mesh(new THREE.SphereGeometry(0.12, 16, 12, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2), new THREE.MeshLambertMaterial({ color: 0xffffff }));
 bobber.add(top, bot);
-bobber.position.set(0.5, 0, -6);
 scene.add(bobber);
+
+// Height of the waves at any point, so the bobber can ride them
+function waveY(x, z, t) {
+  return Math.sin(x * 0.15 + t * 1.1) * 0.12 + Math.cos(z * 0.2 + t * 0.8) * 0.1;
+}
+
+// ---------- Rod ----------
+// "body" turns left/right with your head but doesn't tilt, so the rod stays
+// in your hands when you look down at the water
+const body = new THREE.Object3D();
+scene.add(body);
+const rod = new THREE.Group();
+rod.position.set(0.3, -0.45, -0.4);  // held low and to the right
+rod.rotation.x = -0.8;                // tilted forward
+body.add(rod);
+const rodStick = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.02, 2, 8), new THREE.MeshLambertMaterial({ color: 0x222222 }));
+rodStick.position.y = 1;
+const reelBox = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.05, 12), new THREE.MeshLambertMaterial({ color: 0x888888 }));
+reelBox.rotation.z = Math.PI / 2;
+reelBox.position.set(0, 0.25, 0.04);
+const rodTip = new THREE.Object3D();
+rodTip.position.y = 2;
+rod.add(rodStick, reelBox, rodTip);
+
+// Fishing line: a row of points from the rod tip to the bobber, redrawn every frame
+const LINE_POINTS = 24;
+const lineGeo = new THREE.BufferGeometry();
+lineGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(LINE_POINTS * 3), 3));
+scene.add(new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0xffffff })));
+
+// ---------- Casting ----------
+// state is one of: ready (bobber at the rod), charging (holding), flying, floating, reeling
+let state = 'ready';
+let playing = false;   // true once Start has been pressed
+let power = 0, chargeStart = 0;
+let flyFrom = new THREE.Vector3(), flyTo = new THREE.Vector3(), flyStart = 0, flyTime = 1, flyHeight = 2;
+const tipPos = new THREE.Vector3();
+
+// Power bar, floating just below the middle of your view
+const meter = new THREE.Group();
+meter.position.set(0, -0.3, -1.2);
+const meterBg = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.07), new THREE.MeshBasicMaterial({ color: 0x10202c, depthTest: false }));
+const fillGeo = new THREE.PlaneGeometry(0.6, 0.05);
+fillGeo.translate(0.3, 0, 0);          // so it grows from the left edge
+const meterFill = new THREE.Mesh(fillGeo, new THREE.MeshBasicMaterial({ color: 0x4cd964, depthTest: false }));
+meterFill.position.set(-0.3, 0, 0.001);
+meter.add(meterBg, meterFill);
+meter.renderOrder = meterBg.renderOrder = meterFill.renderOrder = 10;
+meter.visible = false;
+head.add(meter);
+
+// Ring on the water: shows where you're aiming, and doubles as the splash
+const ringMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.7 });
+const ringGeo = new THREE.RingGeometry(0.25, 0.35, 32);
+ringGeo.rotateX(-Math.PI / 2);
+const aimRing = new THREE.Mesh(ringGeo, ringMat);
+aimRing.visible = false;
+scene.add(aimRing);
+const splash = new THREE.Mesh(ringGeo, ringMat.clone());
+splash.visible = false;
+let splashStart = 0;
+scene.add(splash);
+
+// Where a cast with this much power would land: straight ahead of where you're looking
+function castTarget(p, out) {
+  const dist = 4 + p * 26;  // 4 m to 30 m
+  out.set(head.position.x - Math.sin(body.rotation.y) * dist, 0.02, head.position.z - Math.cos(body.rotation.y) * dist);
+  out.z = Math.min(out.z, -2.5); // don't land on the dock or the bank behind you
+  return out;
+}
+
+function press(now) {
+  if (!playing) return;
+  if (state === 'ready') { state = 'charging'; chargeStart = now; power = 0; meter.visible = aimRing.visible = true; }
+  else if (state === 'floating') state = 'reeling';
+}
+function release(now) {
+  if (state !== 'charging') return;
+  meter.visible = aimRing.visible = false;
+  flyFrom.copy(tipPos);
+  castTarget(power, flyTo);
+  const dist = flyFrom.distanceTo(flyTo);
+  flyTime = 0.5 + dist * 0.03;
+  flyHeight = 1.5 + dist * 0.15;
+  flyStart = now;
+  state = 'flying';
+}
+
+// Touch: one finger = cast/reel, two fingers = re-centre
+addEventListener('touchstart', e => {
+  if (e.touches.length >= 2) { recentre(); if (state === 'charging') { state = 'ready'; meter.visible = aimRing.visible = false; } return; }
+  press(clock.getElapsedTime());
+});
+addEventListener('touchend', e => { if (e.touches.length === 0) release(clock.getElapsedTime()); });
+// On the PC: space bar
+addEventListener('keydown', e => { if (e.code === 'Space' && !e.repeat) press(clock.getElapsedTime()); });
+addEventListener('keyup', e => { if (e.code === 'Space') release(clock.getElapsedTime()); });
+// Controller: button 0 (A on most pads), checked every frame
+let padWasDown = false;
+function pollPad(now) {
+  const pads = navigator.getGamepads ? [...navigator.getGamepads()].filter(Boolean) : [];
+  const down = pads.some(p => p.buttons[0] && p.buttons[0].pressed);
+  if (down && !padWasDown) press(now);
+  if (!down && padWasDown) release(now);
+  padWasDown = down;
+}
+
+let lastT = 0;
+function updateFishing(t) {
+  const dt = Math.min(0.1, t - lastT); // seconds since last frame
+  lastT = t;
+  // Turn the body (and rod) to match where your head faces
+  const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(head.quaternion);
+  body.rotation.y = Math.atan2(-fwd.x, -fwd.z);
+  body.position.copy(head.position);
+  body.updateMatrixWorld();
+  rodTip.getWorldPosition(tipPos);
+
+  let sag = 0;
+  if (state === 'ready' || state === 'charging') {
+    bobber.position.set(tipPos.x, tipPos.y - 0.6, tipPos.z); // dangling under the tip
+  }
+  if (state === 'charging') {
+    power = Math.min(1, (t - chargeStart) / 1.2); // full power after 1.2 s
+    meterFill.scale.x = Math.max(power, 0.01);
+    castTarget(power, aimRing.position);
+    aimRing.position.y = 0.05;
+  }
+  if (state === 'flying') {
+    const u = Math.min(1, (t - flyStart) / flyTime);
+    bobber.position.lerpVectors(flyFrom, flyTo, u);
+    bobber.position.y += 4 * flyHeight * u * (1 - u); // arc up and back down
+    if (u >= 1) {
+      state = 'floating';
+      splash.position.copy(flyTo); splash.visible = true; splashStart = t;
+    }
+  }
+  if (state === 'floating') {
+    bobber.position.y = waveY(bobber.position.x, bobber.position.z, t) + 0.02;
+    sag = 0.4;
+  }
+  if (state === 'reeling') {
+    // Temporary auto-reel; step 3 replaces this with real reeling
+    const toTip = new THREE.Vector3().subVectors(tipPos, bobber.position);
+    const step = 8 * dt; // 8 m per second
+    if (toTip.length() < 0.7) state = 'ready';
+    else bobber.position.addScaledVector(toTip.normalize(), step);
+    sag = 0.2;
+  }
+
+  // Splash ring spreads out and fades
+  if (splash.visible) {
+    const s = (t - splashStart) / 0.8;
+    splash.scale.setScalar(1 + s * 6);
+    splash.material.opacity = 0.8 * (1 - s);
+    if (s >= 1) splash.visible = false;
+  }
+
+  // Line from rod tip to bobber, drooping in the middle
+  const lp = lineGeo.attributes.position.array;
+  for (let i = 0; i < LINE_POINTS; i++) {
+    const u = i / (LINE_POINTS - 1);
+    const x = tipPos.x + (bobber.position.x - tipPos.x) * u;
+    const z = tipPos.z + (bobber.position.z - tipPos.z) * u;
+    const y = tipPos.y + (bobber.position.y + 0.12 - tipPos.y) * u - Math.sin(Math.PI * u) * sag;
+    lp[i * 3] = x; lp[i * 3 + 1] = Math.max(y, 0.02); lp[i * 3 + 2] = z;
+  }
+  lineGeo.attributes.position.needsUpdate = true;
+  lineGeo.computeBoundingSphere();
+}
 
 // ---------- Joy-Con / gamepad test board ----------
 // A floating sign that shows every button and stick the browser can see.
@@ -249,11 +418,11 @@ document.getElementById('go').addEventListener('click', async () => {
   });
   document.getElementById('start').style.display = 'none';
   document.getElementById('divider').style.display = 'block';
+  playing = true;
   // Stop the screen going to sleep mid-game. Not awaited: on some iOS versions
   // this never answers in a home-screen app, which used to freeze the Start button.
   try { navigator.wakeLock?.request('screen').catch(() => {}); } catch {}
 });
-addEventListener('touchend', () => recentre());
 
 // ---------- Draw loop ----------
 const clock = new THREE.Clock();
@@ -264,12 +433,14 @@ function frame() {
   const pos = waterGeo.attributes.position.array;
   for (let i = 0; i < pos.length; i += 3) {
     const x = waterBase[i], z = waterBase[i + 2];
-    pos[i + 1] = Math.sin(x * 0.15 + t * 1.1) * 0.12 + Math.cos(z * 0.2 + t * 0.8) * 0.1;
+    pos[i + 1] = waveY(x, z, t);
   }
   waterGeo.attributes.position.needsUpdate = true;
-  bobber.position.y = Math.sin(t * 1.6) * 0.04 + 0.02;
 
   if (!updateHeadFromGyro()) head.rotation.set(mousePitch, mouseYaw, 0, 'YXZ');
+  head.updateMatrixWorld();
+  pollPad(t);
+  updateFishing(t);
   drawBoard();
 
   // Render twice: left half of the screen for the left eye, right half for the right

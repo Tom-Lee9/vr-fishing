@@ -251,7 +251,8 @@ function castTarget(p, out) {
 // ---------- Bites ----------
 // After a random wait the bobber twitches a few times (nibbles), then gets
 // pulled right under (the bite). Press during the bite to hook the fish.
-const BITE_WINDOW = 1.2; // seconds you get to react
+const UNDER_TIME = 1.5;  // seconds the bobber stays pulled under
+const BITE_WINDOW = UNDER_TIME + 0.3 + 1; // ...plus rising back up, plus 1 s more to react
 let nextNibble = 0, nibblesLeft = 0, nibbleStart = -10, biteStart = -10;
 function waitForFish(t) {
   nextNibble = t + 3 + Math.random() * 7;
@@ -368,7 +369,9 @@ function updateFishing(t) {
       nextNibble = Math.max(nextNibble, t + 2); // fish won't bite a moving bobber
       biteStart = -10;
     } else if (biteStart > 0) {
-      if (t - biteStart < BITE_WINDOW) y -= 0.25; // pulled under!
+      const b = t - biteStart;
+      // Dive fast, stay right under, then float back up
+      if (b < BITE_WINDOW) y -= 0.5 * Math.min(1, b / 0.15) * Math.min(1, Math.max(0, (UNDER_TIME + 0.3 - b) / 0.3));
       else { say('Missed it!', 1.5); waitForFish(t); }
     } else if (t > nextNibble) {
       if (nibblesLeft > 0) { nibblesLeft--; nibbleStart = t; nextNibble = t + 0.8 + Math.random() * 1.5; }
@@ -381,18 +384,18 @@ function updateFishing(t) {
   if (state === 'fighting') {
     if (t > fish.nextSurge) {
       fish.surgeUntil = t + 0.8 + Math.random();
-      fish.nextSurge = fish.surgeUntil + 2 + Math.random() * 3;
+      fish.nextSurge = fish.surgeUntil + 3 + Math.random() * 3;
       splashAt(bobber.position, t);
     }
     // How hard the fish pulls right now: harder in a surge, weaker as it tires
     const pull = fish.strength * (surging ? 1 : 0.45) * (0.4 + 0.6 * fish.stamina);
     if (held) {
-      fish.dist -= 2.2 * (1 - pull * 0.6) * dt;
-      tension += (pull * 0.9 - 0.15) * dt;
+      fish.dist -= 2.6 * (1 - pull * 0.6) * dt;
+      tension += (pull * 0.6 - 0.15) * dt;
       fish.stamina = Math.max(0, fish.stamina - 0.07 * dt);
     } else {
       fish.dist += pull * 1.2 * dt;  // fish swims off and pulls line out
-      tension -= 0.5 * dt;
+      tension -= 0.8 * dt;
     }
     tension = Math.max(0, tension);
     if (held || tension > 0.05) slackSince = t;
@@ -404,7 +407,7 @@ function updateFishing(t) {
 
     if (tension >= 1) endFight(t, 'Snap! Line broke', 'ready');
     else if (fish.dist > 35) endFight(t, 'It got away!', 'floating');
-    else if (t - slackSince > 4) endFight(t, 'Slack line, it got off!', 'floating');
+    else if (t - slackSince > 6) endFight(t, 'Slack line, it got off!', 'floating');
     else if (fish.dist < 2.5) endFight(t, `Caught! ${fish.weight.toFixed(1)} kg`, 'ready');
   }
   meter.visible = state === 'charging' || state === 'fighting';
@@ -502,12 +505,12 @@ for (let i = 0; i < 7; i++) {
   ducks.push({ d, hx, hz, phase: rand() * 6, spin: (rand() < 0.5 ? -1 : 1) * (0.05 + rand() * 0.06), r: 1 + rand() * 2 });
 }
 
-let nextSchool = 5, nextBig = 20, lastWildT = 0;
+let nextSchool = 3, nextBig = 10, lastWildT = 0;
 function updateWildlife(t) {
   const dt = Math.min(0.1, t - lastWildT);
   lastWildT = t;
-  if (t > nextSchool) { spawnSchool(t); nextSchool = t + 15 + Math.random() * 25; }
-  if (t > nextBig) { spawnBigFish(t); nextBig = t + 30 + Math.random() * 40; }
+  if (t > nextSchool) { spawnSchool(t); nextSchool = t + 6 + Math.random() * 9; }
+  if (t > nextBig) { spawnBigFish(t); nextBig = t + 15 + Math.random() * 15; }
 
   for (let i = swimmers.length - 1; i >= 0; i--) {
     const s = swimmers[i], o = s.obj, age = t - s.born;

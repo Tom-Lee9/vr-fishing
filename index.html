@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<!-- Lets "Add to Home Screen" open full screen with no Safari bars -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="VR Fishing">
+<title>VR Fishing</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; touch-action: none; }
+  canvas { display: block; }
+  /* Thin line down the middle so you can line the phone up with the headset */
+  #divider { position: fixed; top: 0; bottom: 0; left: 50%; width: 2px; margin-left: -1px; background: #222; display: none; pointer-events: none; }
+  #start { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+           background: #0b2233; color: #fff; font: 16px -apple-system, system-ui, sans-serif; text-align: center; padding: 20px; gap: 14px; }
+  #start h1 { margin: 0; font-size: 28px; }
+  #start button { font: inherit; font-size: 20px; padding: 14px 28px; border: 0; border-radius: 12px; background: #2a9df4; color: #fff; }
+  #start p { margin: 0; max-width: 460px; opacity: .8; line-height: 1.4; }
+  #msg { color: #ffb347; }
+</style>
+</head>
+<body>
+<div id="start">
+  <h1>🎣 VR Fishing</h1>
+  <p>Turn your phone sideways. Tap Start, allow motion access, then slide it into the headset.</p>
+  <button id="go" disabled>Loading…</button>
+  <p id="msg"></p>
+  <p>Tap the screen any time to re-centre the view.</p>
+</div>
+<div id="divider"></div>
+
+<script>
+  // Show any error on the start screen, so a broken load isn't just "nothing happens"
+  function showError(text) { var m = document.getElementById('msg'); if (m) m.textContent += ' Error: ' + text; }
+  window.addEventListener('error', function (e) { showError((e.message || 'a file failed to load') + (e.lineno ? ' (line ' + e.lineno + ')' : '')); }, true);
+  window.addEventListener('unhandledrejection', function (e) { showError(String(e.reason)); });
+  // If the game code hasn't loaded after 10 s, say so
+  setTimeout(function () { if (!window.gameReady) showError('game code did not load. Check your internet, or tell Claude your iOS version.'); }, 10000);
+</script>
+<script type="module">
+// Imported by full URL (not an import map) so it also works on older iPhones
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+
+// ---------- Settings ----------
+const EYE_GAP = 0.064;   // distance between your eyes in metres (average is ~6.4 cm)
+const EYE_HEIGHT = 1.6;  // standing on the dock
+
+// ---------- Renderer ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // full retina res is too slow x2 eyes
+renderer.setSize(innerWidth, innerHeight);
+renderer.setScissorTest(true);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x9fd3f0);
+scene.fog = new THREE.Fog(0x9fd3f0, 40, 160);
+
+// "head" is where you are; the two eye cameras sit inside it, one each side
+const head = new THREE.Object3D();
+head.position.set(0, EYE_HEIGHT, 0);
+scene.add(head);
+const leftEye  = new THREE.PerspectiveCamera(90, 1, 0.05, 300);
+const rightEye = new THREE.PerspectiveCamera(90, 1, 0.05, 300);
+leftEye.position.x  = -EYE_GAP / 2;
+rightEye.position.x =  EYE_GAP / 2;
+head.add(leftEye, rightEye);
+
+// ---------- Lights ----------
+scene.add(new THREE.HemisphereLight(0xcfeaff, 0x3a5a2a, 1.1));
+const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+sun.position.set(30, 50, -20);
+scene.add(sun);
+
+// ---------- World ----------
+// Water: a big plane whose vertices bob up and down each frame
+const waterGeo = new THREE.PlaneGeometry(300, 300, 60, 60);
+waterGeo.rotateX(-Math.PI / 2);
+const water = new THREE.Mesh(waterGeo, new THREE.MeshPhongMaterial({
+  color: 0x1f6e8c, shininess: 90, specular: 0x99ccff, flatShading: true, transparent: true, opacity: 0.92
+}));
+scene.add(water);
+const waterBase = waterGeo.attributes.position.array.slice();
+
+// Dock you're standing on
+const wood = new THREE.MeshLambertMaterial({ color: 0x8b5a2b });
+const dock = new THREE.Mesh(new THREE.BoxGeometry(3, 0.2, 10), wood);
+dock.position.set(0, 0.4, 3);
+scene.add(dock);
+for (const x of [-1.3, 1.3]) for (const z of [-1.5, 3, 7.5]) {
+  const post = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 2), wood);
+  post.position.set(x, -0.3, z);
+  scene.add(post);
+}
+
+// Shoreline ring of hills and trees, so you have things at lots of distances
+// (that's what makes the 3D depth obvious)
+const grass = new THREE.MeshLambertMaterial({ color: 0x4f8a3a, flatShading: true });
+const trunkMat = new THREE.MeshLambertMaterial({ color: 0x5a3a1e });
+const leafMat = new THREE.MeshLambertMaterial({ color: 0x2f6b2f, flatShading: true });
+let seed = 7;
+const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+for (let i = 0; i < 40; i++) {
+  const a = (i / 40) * Math.PI * 2;
+  const r = 70 + rand() * 30;
+  const hill = new THREE.Mesh(new THREE.ConeGeometry(12 + rand() * 14, 8 + rand() * 18, 7), grass);
+  hill.position.set(Math.cos(a) * r, 0, Math.sin(a) * r);
+  scene.add(hill);
+}
+function tree(x, z, s) {
+  const t = new THREE.Group();
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.15 * s, 0.2 * s, 1.5 * s), trunkMat);
+  trunk.position.y = 0.75 * s;
+  const leaves = new THREE.Mesh(new THREE.ConeGeometry(1.2 * s, 3 * s, 7), leafMat);
+  leaves.position.y = 2.8 * s;
+  t.add(trunk, leaves);
+  t.position.set(x, 0, z);
+  scene.add(t);
+}
+// Behind you on the bank
+const bank = new THREE.Mesh(new THREE.BoxGeometry(60, 1, 20), grass);
+bank.position.set(0, 0, 17);
+scene.add(bank);
+for (let i = 0; i < 25; i++) tree(-28 + rand() * 56, 9 + rand() * 15, 0.8 + rand() * 0.8);
+// A small island out in the lake
+const island = new THREE.Mesh(new THREE.CylinderGeometry(6, 8, 1.5, 9), grass);
+island.position.set(-18, 0, -35);
+scene.add(island);
+for (let i = 0; i < 6; i++) tree(-18 + (rand() - .5) * 8, -35 + (rand() - .5) * 8, 0.9 + rand() * 0.5);
+
+// A bobber floating close-ish in front of you, to judge depth
+const bobber = new THREE.Group();
+const top = new THREE.Mesh(new THREE.SphereGeometry(0.12, 16, 12, 0, Math.PI * 2, 0, Math.PI / 2), new THREE.MeshLambertMaterial({ color: 0xff3030 }));
+const bot = new THREE.Mesh(new THREE.SphereGeometry(0.12, 16, 12, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2), new THREE.MeshLambertMaterial({ color: 0xffffff }));
+bobber.add(top, bot);
+bobber.position.set(0.5, 0, -6);
+scene.add(bobber);
+
+// ---------- Joy-Con / gamepad test board ----------
+// A floating sign that shows every button and stick the browser can see.
+// HTML text wouldn't work in VR (it wouldn't be in 3D), so we draw onto a texture.
+const boardCanvas = document.createElement('canvas');
+boardCanvas.width = 512; boardCanvas.height = 384;
+const bctx = boardCanvas.getContext('2d');
+const boardTex = new THREE.CanvasTexture(boardCanvas);
+boardTex.colorSpace = THREE.SRGBColorSpace;
+const board = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 1.2), new THREE.MeshBasicMaterial({ map: boardTex }));
+board.position.set(-1.6, 1.6, -2.2);
+board.rotation.y = 0.5;
+scene.add(board);
+let lastBoardText = '';
+
+function drawBoard() {
+  const pads = navigator.getGamepads ? [...navigator.getGamepads()].filter(Boolean) : [];
+  const lines = [];
+  if (!pads.length) {
+    lines.push('No controller found.', '', 'Pair a Joy-Con in iPhone', 'Settings > Bluetooth, then', 'PRESS ANY BUTTON on it.');
+  }
+  for (const p of pads) {
+    lines.push(p.id.slice(0, 34));
+    const down = p.buttons.map((b, i) => b.pressed ? i : null).filter(i => i !== null);
+    lines.push(`Buttons (${p.buttons.length}): ${down.length ? down.join(' ') : '-'}`);
+    for (let i = 0; i < p.axes.length; i += 2) {
+      const a = p.axes.slice(i, i + 2).map(v => v.toFixed(2)).join('  ');
+      lines.push(`Axes ${i}-${i + 1}: ${a}`);
+    }
+    lines.push('');
+  }
+  const text = lines.join('\n');
+  if (text === lastBoardText) return; // only redraw when something changed
+  lastBoardText = text;
+  bctx.fillStyle = '#10202c'; bctx.fillRect(0, 0, 512, 384);
+  bctx.strokeStyle = '#2a9df4'; bctx.lineWidth = 8; bctx.strokeRect(4, 4, 504, 376);
+  bctx.fillStyle = '#fff'; bctx.font = 'bold 30px sans-serif';
+  bctx.fillText('Controller test', 24, 48);
+  bctx.font = '24px monospace';
+  lines.forEach((l, i) => bctx.fillText(l, 24, 92 + i * 30));
+  boardTex.needsUpdate = true;
+}
+
+// ---------- Head tracking (phone gyro) ----------
+// Converts the phone's orientation angles into a rotation for the head.
+// This is the standard maths three.js used to ship as DeviceOrientationControls.
+let orient = null;
+let yawOffset = 0; // set by tapping, so "forward" is wherever you're facing
+const qFinal = new THREE.Quaternion();
+const qScreen = new THREE.Quaternion();
+const qMinus90X = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5));
+const euler = new THREE.Euler();
+const zAxis = new THREE.Vector3(0, 0, 1);
+const yAxis = new THREE.Vector3(0, 1, 0);
+const qYaw = new THREE.Quaternion();
+
+function screenAngle() {
+  if (screen.orientation && typeof screen.orientation.angle === 'number') return screen.orientation.angle;
+  return window.orientation || 0;
+}
+function updateHeadFromGyro() {
+  if (!orient || orient.alpha === null) return false;
+  const d = THREE.MathUtils.degToRad;
+  euler.set(d(orient.beta), d(orient.alpha), -d(orient.gamma), 'YXZ');
+  qFinal.setFromEuler(euler);
+  qFinal.multiply(qMinus90X);                                   // phone looks out the back, not the top
+  qFinal.multiply(qScreen.setFromAxisAngle(zAxis, -d(screenAngle()))); // landscape fix
+  qYaw.setFromAxisAngle(yAxis, -yawOffset);
+  head.quaternion.copy(qYaw).multiply(qFinal);
+  return true;
+}
+function recentre() {
+  // Measure which way you're facing right now and cancel it out
+  if (!orient) return;
+  updateHeadFromGyro();
+  const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(qFinal);
+  yawOffset = Math.atan2(-fwd.x, -fwd.z);
+}
+
+// ---------- Mouse look (for testing on the PC, which has no gyro) ----------
+let mouseYaw = 0, mousePitch = 0, dragging = false;
+addEventListener('mousedown', () => dragging = true);
+addEventListener('mouseup', () => dragging = false);
+addEventListener('mousemove', e => {
+  if (!dragging) return;
+  mouseYaw -= e.movementX * 0.004;
+  mousePitch = Math.max(-1.4, Math.min(1.4, mousePitch - e.movementY * 0.004));
+});
+
+// ---------- Start button (iPhone needs a tap before it'll share motion) ----------
+const msg = document.getElementById('msg');
+const goBtn = document.getElementById('go');
+document.getElementById('go').addEventListener('click', async () => {
+  goBtn.textContent = 'Starting…'; // proves the tap registered
+  try {
+    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+      const res = await DeviceOrientationEvent.requestPermission();
+      if (res !== 'granted') { msg.textContent = 'Motion access was denied. Close the app fully and try again.'; goBtn.textContent = 'Start'; return; }
+    }
+  } catch (e) {
+    msg.textContent = 'Motion access needs an https:// link (it won\'t work from a file).';
+    goBtn.textContent = 'Start';
+    return;
+  }
+  addEventListener('deviceorientation', e => {
+    const first = !orient;
+    orient = e;
+    if (first && e.alpha !== null) recentre();
+  });
+  document.getElementById('start').style.display = 'none';
+  document.getElementById('divider').style.display = 'block';
+  // Stop the screen going to sleep mid-game. Not awaited: on some iOS versions
+  // this never answers in a home-screen app, which used to freeze the Start button.
+  try { navigator.wakeLock?.request('screen').catch(() => {}); } catch {}
+});
+addEventListener('touchend', () => recentre());
+
+// ---------- Draw loop ----------
+const clock = new THREE.Clock();
+function frame() {
+  const t = clock.getElapsedTime();
+
+  // Waves
+  const pos = waterGeo.attributes.position.array;
+  for (let i = 0; i < pos.length; i += 3) {
+    const x = waterBase[i], z = waterBase[i + 2];
+    pos[i + 1] = Math.sin(x * 0.15 + t * 1.1) * 0.12 + Math.cos(z * 0.2 + t * 0.8) * 0.1;
+  }
+  waterGeo.attributes.position.needsUpdate = true;
+  bobber.position.y = Math.sin(t * 1.6) * 0.04 + 0.02;
+
+  if (!updateHeadFromGyro()) head.rotation.set(mousePitch, mouseYaw, 0, 'YXZ');
+  drawBoard();
+
+  // Render twice: left half of the screen for the left eye, right half for the right
+  const w = innerWidth / 2, h = innerHeight;
+  for (const [cam, x] of [[leftEye, 0], [rightEye, w]]) {
+    cam.aspect = w / h;
+    cam.updateProjectionMatrix();
+    renderer.setViewport(x, 0, w, h);
+    renderer.setScissor(x, 0, w, h);
+    renderer.render(scene, cam);
+  }
+  requestAnimationFrame(frame);
+}
+addEventListener('resize', () => renderer.setSize(innerWidth, innerHeight));
+frame();
+
+// Everything loaded: unlock the Start button
+goBtn.disabled = false;
+if (!window.isSecureContext) msg.textContent = 'Heads up: this isn\'t an https:// link, so head tracking won\'t work. Open the GitHub Pages link instead.';
+goBtn.textContent = 'Start';
+window.gameReady = true;
+</script>
+</body>
+</html>

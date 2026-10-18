@@ -30,6 +30,7 @@
   <p id="msg"></p>
   <p>Hold the screen (or headset button) to charge a cast, let go to throw it where you're looking. When the bobber gets pulled under, tap fast to hook the fish. Then hold to reel in. When the fish makes a run (RUN!), stop winding and let it take line, or the line snaps. The white mark on the bar is your drag; the number shows how much line is left. Hold with no fish on to wind back in. After a catch, look at Keep or Release and tap. Look at the Aquarium button under your catch log to visit your fish. Your catch log is on your left. Two-finger tap re-centres.</p>
   <p>Joy-Cons: hold ZR or R to cast, press it to hook, spin the right stick in circles to reel, + re-centres.</p>
+  <p>Buy a boat in the Aquarium's Shop, then look at "Take the boat" under the catch log. Push a stick to drive. Look down-left at the dashboard to get back on the jetty.</p>
 </div>
 <div id="divider"></div>
 
@@ -651,7 +652,7 @@ function closeCatch() {
 function press(now, fromPad) {
   if (!playing) return;
   if (hovered) { held = false; hovered.userData.onClick(); return; } // looking at a button: press it
-  if (state === 'showing' || state === 'aquarium') return;           // these screens only use buttons
+  if (state === 'showing' || state === 'aquarium' || state === 'shop') return; // these screens only use buttons
   held = !fromPad; // on a controller you wind with the stick instead
   if (state === 'ready') { state = 'charging'; chargeStart = now; power = 0; }
   else if (state === 'floating' && now - biteStart < BITE_WINDOW) hookFish(now);
@@ -683,6 +684,7 @@ addEventListener('keyup', e => { if (e.code === 'Space') release(clock.getElapse
 // (Standard button numbers: 5 = R, 7 = ZR, 9 = +. Button 0 kept for other pads.)
 const CAST_BUTTONS = [5, 7, 0];
 let padWasDown = false, plusWasDown = false;
+let stickX = 0, stickY = 0;               // the most pushed-over stick (for driving the boat)
 let crankAngle = {}, crankSpeed = 0;   // last angle of each stick; crankSpeed = turns per second (smoothed)
 let lastPadT = 0, padStatus = '';
 function pollPad(now) {
@@ -702,9 +704,11 @@ function pollPad(now) {
   // controller, because Joy-Cons can show up as one pad or as two separate ones (left
   // first), and a single sideways Joy-Con puts its stick on the first two axes.
   let rate = 0;
+  stickX = stickY = 0;
   for (const p of pads) {
     for (let a = 0; a + 1 < p.axes.length && a < 4; a += 2) {
       const key = p.index + ':' + a, x = p.axes[a] || 0, y = p.axes[a + 1] || 0;
+      if (Math.hypot(x, y) > Math.hypot(stickX, stickY)) { stickX = x; stickY = y; }
       if (Math.hypot(x, y) > 0.6) {          // stick pushed out to the edge
         const ang = Math.atan2(y, x);
         if (crankAngle[key] !== undefined && dt > 0) {
@@ -731,7 +735,7 @@ let lastT = 0;
 function updateFishing(t) {
   const dt = Math.min(0.1, t - lastT); // seconds since last frame
   lastT = t;
-  if (state === 'aquarium') return;
+  if (state === 'aquarium' || state === 'shop') return;
   // Holding the screen / space = full-speed winding; otherwise however fast you spin the stick
   const reel = held ? 1 : Math.min(1, crankSpeed * 1.5); // 2 turns every 3 seconds = full speed
   // Turn the body (and rod) to match where your head faces
@@ -841,7 +845,7 @@ function updateFishing(t) {
     f.stamina = Math.max(0, f.stamina - dt * (0.004 + (slipping ? 0.02 : 0) + tension * 0.02) / f.type.fight ** 2);
     if (tension > 0.05) slackSince = t;
     bobber.position.set(f.x, -0.15, f.z);
-    setMeter(tension, true);
+    setMeter(tension / gear.lineStrength, true);
     setLineLeft(gear.spool - f.line);
 
     if (tension >= gear.lineStrength) endFight(t, 'Snap! Line broke', 'ready');
@@ -1308,10 +1312,11 @@ function sellPrice(f) {
   return Math.round(SELL[type.rarity] * (0.6 + 0.8 * f.rel));
 }
 const keepBtn = makeButton('Keep', 0.34, 0.14, '#3a9d4f', () => {
-  records.tank.push({ name: fish.type.name, cm: fish.cm, rel: fish.rel, at: Date.now() });
+  const rec = { name: fish.type.name, cm: fish.cm, rel: fish.rel, at: Date.now(), fed: Date.now() };
+  (onBoat ? records.hold : records.tank).push(rec);
   saveRecords();
   closeCatch();
-  say('Into the tank!', 2);
+  say(onBoat ? `In the boat (${Math.round(holdKg())} kg)` : 'Into the tank!', 2);
 });
 const releaseBtn = makeButton('Release', 0.34, 0.14, '#d64545', () => {
   closeCatch();
@@ -1323,8 +1328,8 @@ releaseBtn.position.set(0.3, -0.62, -1.15);
 keepBtn.visible = releaseBtn.visible = false;
 body.add(keepBtn, releaseBtn);
 function showCatchButtons() {
-  const full = records.tank.length >= records.tankSize;
-  setButton(keepBtn, full ? 'Tank full' : 'Keep', '#3a9d4f', !full);
+  const full = onBoat ? holdKg() + fishKg(fish.cm) > vehicle().carry : records.tank.length >= records.tankSize;
+  setButton(keepBtn, full ? (onBoat ? 'Boat full' : 'Tank full') : 'Keep', '#3a9d4f', !full);
   keepBtn.visible = releaseBtn.visible = true;
 }
 function hideCatchButtons() { keepBtn.visible = releaseBtn.visible = false; }
@@ -1412,9 +1417,8 @@ function drawMoney(hint) {
 const backBtn = makeButton('Back', 0.6, 0.3, '#1f6fb2', () => (selected ? deselectFish() : closeAquarium()));
 backBtn.position.set(1.65, 2.95, TANK.z + 0.66);
 aquaScene.add(backBtn);
-const shopBtn = makeButton('Shop (coming soon)', 1.2, 0.3, '#1f6fb2', () => {});
+const shopBtn = makeButton('Shop', 1.2, 0.3, '#1f6fb2', () => openShop());
 shopBtn.position.set(0, 0.5, TANK.z + 0.66);
-setButton(shopBtn, 'Shop (coming soon)', '#1f6fb2', false);
 aquaScene.add(shopBtn);
 
 // Info panel for the fish you've picked (to the right of the tank)
@@ -1431,6 +1435,9 @@ infoPanel.add(new THREE.Mesh(new THREE.PlaneGeometry(1, 0.78), new THREE.MeshBas
 const sellBtn = makeButton('Sell', 0.7, 0.18, '#3a9d4f', () => sellFish());
 sellBtn.position.set(0, -0.53, 0.01);
 infoPanel.add(sellBtn);
+const feedBtn = makeButton('Feed', 0.7, 0.14, '#1f6fb2', () => feedFish());
+feedBtn.position.set(0, -0.72, 0.01);
+infoPanel.add(feedBtn);
 
 // ---------- Fish in the tank ----------
 // Swimming version of a fish model: upright, nose along +x
@@ -1483,9 +1490,12 @@ function selectFish(f) {
   g.fillStyle = '#fff'; g.font = '40px sans-serif'; g.fillText(`${Math.round(f.rec.cm)} cm`, 256, 190);
   g.fillStyle = '#9fb8c8'; g.font = '28px sans-serif';
   g.fillText(`Caught ${new Date(f.rec.at).toLocaleDateString('en-AU')}`, 256, 245);
-  g.fillText('Feeding: coming soon', 256, 290);
+  const hrs = (Date.now() - f.rec.fed) / HOUR;
+  g.fillStyle = isHungry(f.rec) ? '#ff6b5e' : '#9fb8c8';
+  g.fillText(isHungry(f.rec) ? `HUNGRY! Dies in ${Math.max(1, Math.round(72 - hrs))} h` : `Fed ${hrs < 1 ? 'just now' : Math.round(hrs) + ' h ago'}`, 256, 290);
   infoTex.needsUpdate = true;
   setButton(sellBtn, `Sell  $${sellPrice(f.rec)}`, '#3a9d4f', true);
+  setButton(feedBtn, records.food > 0 ? `Feed (${records.food} food left)` : 'No food left', '#1f6fb2', records.food > 0);
   infoPanel.visible = true;
   for (const o of tankFish) o.hit.userData.enabled = false;  // pointer only on the panel now
   drawMoney('Back to see all your fish');
@@ -1508,6 +1518,9 @@ function sellFish() {
 
 function openAquarium() {
   if (state !== 'ready') { say('Reel in first', 1.5); return; }
+  if (onBoat) { say('Get back on the jetty first', 2); return; }
+  const dead = starvedFish();
+  if (dead.length) say(dead.length > 1 ? `${dead.length} fish died of hunger` : `Your ${dead[0]} died of hunger`, 3);
   state = 'aquarium';
   aquaScene.add(head);          // move "you" (and your eyes) into the aquarium room
   head.position.z = 1.2;        // standing back a bit so the whole tank fits in view
@@ -1538,7 +1551,7 @@ function updateAquarium(t) {
     let turn = want - f.heading;
     turn = Math.atan2(Math.sin(turn), Math.cos(turn));      // shortest way round
     f.heading += turn * Math.min(1, dt * 2.5);
-    const sp = (f === selected ? 0.12 : f.speed) * Math.min(1, to.length() * 3);
+    const sp = (f === selected ? 0.12 : f.speed) * Math.min(1, to.length() * 3) * (isHungry(f.rec) ? 0.4 : 1);
     f.g.position.x += Math.cos(f.heading) * sp * dt;
     f.g.position.z -= Math.sin(f.heading) * sp * dt;
     f.g.position.y += Math.sign(to.y) * Math.min(Math.abs(to.y), 0.1 * dt);
@@ -1550,6 +1563,501 @@ function updateAquarium(t) {
   }
 }
 
+// ---------- Feeding ----------
+// Real time: a fish gets hungry a day after its last feed, and dies after 3 days with no food.
+const HOUR = 3600 * 1000;
+const HUNGRY_AFTER = 24 * HOUR, DIES_AFTER = 72 * HOUR;
+records.food = records.food || 0;
+for (const r of records.tank) r.fed = r.fed || Date.now();   // fish kept before feeding existed start full
+function isHungry(rec) { return Date.now() - rec.fed > HUNGRY_AFTER; }
+// Takes out any fish that went too long without food, and returns their names
+function starvedFish() {
+  const dead = records.tank.filter(r => Date.now() - r.fed > DIES_AFTER);
+  if (dead.length) { records.tank = records.tank.filter(r => !dead.includes(r)); saveRecords(); }
+  return dead.map(r => r.name);
+}
+function feedFish() {
+  records.food--;
+  selected.rec.fed = Date.now();
+  saveRecords();
+  selectFish(selected);
+  say('Yum!', 1.2);
+}
+
+// ---------- Upgrades ----------
+records.up = records.up || { line: 0, reel: 0 };
+const LINE_LEVELS = [1, 1.2, 1.45, 1.75];           // how much strain the line takes before it snaps
+const REEL_LEVELS = [{ speed: 1.5, spool: 100 }, { speed: 1.8, spool: 150 }, { speed: 2.2, spool: 200 }, { speed: 2.6, spool: 300 }];
+const TANK_SIZES = [5, 8, 12, 20];
+const tankLevel = () => Math.max(0, TANK_SIZES.indexOf(records.tankSize));
+const UPGRADES = [
+  { name: 'Line & drag', level: () => records.up.line, prices: [60, 180, 450],
+    info: l => `Strength ${Math.round(LINE_LEVELS[l] * 100)}%`, buy: () => records.up.line++ },
+  { name: 'Reel', level: () => records.up.reel, prices: [50, 150, 400],
+    info: l => `${REEL_LEVELS[l].spool} m line, ${REEL_LEVELS[l].speed} m/s`, buy: () => records.up.reel++ },
+  { name: 'Tank size', level: tankLevel, prices: [40, 120, 300],
+    info: l => `Holds ${TANK_SIZES[l]} fish`, buy: () => (records.tankSize = TANK_SIZES[tankLevel() + 1]) },
+];
+function applyGear() {
+  gear.lineStrength = LINE_LEVELS[records.up.line];
+  gear.drag = 0.7 * gear.lineStrength;              // drag mark stays in the same place on the bar
+  gear.reelSpeed = REEL_LEVELS[records.up.reel].speed;
+  gear.spool = REEL_LEVELS[records.up.reel].spool;
+}
+applyGear();
+
+// ---------- Vehicles ----------
+// All built pointing along +x with the bottom at y = 0, like the other boats
+function makeRowboat() {
+  const g = new THREE.Group();
+  hull(3.4, 1.3, 0.45, 0x8b5a2b, g);
+  for (const x of [-0.9, 0.3]) put(new THREE.BoxGeometry(0.3, 0.08, 1.2), 0xc49a6c, x, 0.5, 0, g);   // seats
+  for (const s of [-1, 1]) {
+    const oar = put(new THREE.CylinderGeometry(0.03, 0.03, 2.2, 5), 0xc49a6c, -0.3, 0.5, s * 1.3, g);
+    oar.rotation.x = s * (Math.PI / 2 + 0.3);
+  }
+  return g;
+}
+function makeYellowTinny() {
+  const g = new THREE.Group();
+  hull(4, 1.6, 0.55, 0xf2c230, g);
+  put(new THREE.BoxGeometry(2.8, 0.1, 1.62), 0xd63a2f, -0.55, 0.06, 0, g);    // red stripe along the bottom
+  put(new THREE.BoxGeometry(2.8, 0.06, 1.62), 0xf4f4f0, -0.55, 0.55, 0, g);   // white top
+  put(new THREE.BoxGeometry(0.3, 0.25, 1.4), 0xf4f4f0, 0.2, 0.68, 0, g);      // seat
+  put(new THREE.BoxGeometry(0.35, 0.8, 0.35), 0x222222, -2.1, 0.55, 0, g);    // outboard motor
+  return g;
+}
+function makePlaneSilhouette() {                 // locked: a black shape with a padlock
+  const g = new THREE.Group(), black = new THREE.MeshBasicMaterial({ color: 0x000000 });
+  const box = (w, h, d, x, y, z) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), black); m.position.set(x, y, z); g.add(m); };
+  box(2.4, 0.35, 0.35, 0, 1.1, 0);               // body
+  box(0.55, 0.05, 3, 0.2, 1.5, 0);               // top wing
+  box(0.55, 0.05, 2.6, 0.2, 0.95, 0);            // bottom wing
+  box(0.3, 0.5, 0.05, -1.15, 1.4, 0);            // tail fin
+  box(0.25, 0.04, 0.9, -1.15, 1.2, 0);           // tail wings
+  for (const z of [-0.55, 0.55]) { box(2, 0.18, 0.22, 0.1, 0.1, z); box(0.05, 0.85, 0.05, 0.2, 0.55, z); } // floats and struts
+  const lock = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.26, 0.4), lock);
+  body.position.set(0.1, 1.1, 0);
+  const shackle = new THREE.Mesh(new THREE.TorusGeometry(0.1, 0.03, 6, 12, Math.PI), lock);
+  shackle.position.set(0.1, 1.23, 0);
+  shackle.rotation.y = Math.PI / 2;
+  g.add(body, shackle);
+  return g;
+}
+const FUEL_TANK = 25, FUEL_PRICE = 2.5;          // litres, $ per litre
+const VEHICLES = [
+  { id: 'rowboat', name: 'Rowboat', price: 100, kmL: 0, kph: 25, carry: 100, make: makeRowboat },
+  { id: 'tinny', name: 'Tinny', price: 500, kmL: 4, kph: 50, carry: 200, make: makeYellowTinny },
+  { id: 'seaplane', name: '???', locked: true, make: makePlaneSilhouette },
+];
+records.boats = records.boats || [];             // ids of vehicles you own
+records.boat = records.boat || null;             // the one you take out
+records.fuel = records.fuel || 0;
+records.hold = records.hold || [];               // fish kept on the boat, not unloaded yet
+const vehicle = () => VEHICLES.find(v => v.id === records.boat);
+const fishKg = cm => 0.000014 * cm ** 3;         // rough weight of a fish this long
+const holdKg = () => records.hold.reduce((s, r) => s + fishKg(r.cm), 0);
+
+// ---------- Shop ----------
+// A dark room. The menu has four slowly spinning models; look at one and tap.
+const shopScene = new THREE.Scene();
+shopScene.background = new THREE.Color(0x050608);
+shopScene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.6));
+const shopSun = new THREE.DirectionalLight(0xffffff, 1.5);
+shopSun.position.set(1, 3, 2);
+shopScene.add(shopSun);
+const E = EYE_HEIGHT;
+
+// A flat sign you can draw text on
+function textPanel(w, h, res = 512) {
+  const c = document.createElement('canvas');
+  c.width = res; c.height = Math.round(res * h / w);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: tex, transparent: true }));
+  return { mesh, c, g: c.getContext('2d'), tex };
+}
+function panelBg(p, color) {
+  p.g.clearRect(0, 0, p.c.width, p.c.height);
+  p.g.fillStyle = color; p.g.beginPath(); p.g.roundRect(0, 0, p.c.width, p.c.height, 24); p.g.fill();
+}
+// Shrink/grow a model to a size and centre it, inside a group that can spin
+function fitModel(obj, size) {
+  const box = new THREE.Box3().setFromObject(obj), s = box.getSize(new THREE.Vector3()), c = box.getCenter(new THREE.Vector3());
+  const k = size / Math.max(s.x, s.y, s.z);
+  obj.scale.multiplyScalar(k);
+  obj.position.sub(c.multiplyScalar(k));
+  const pivot = new THREE.Group();
+  pivot.add(obj);
+  pivot.rotation.x = 0.25;                       // tipped towards you a little
+  return pivot;
+}
+// Menu models
+function makeTrawler() {
+  const g = new THREE.Group();
+  hull(4, 1.6, 0.9, 0xd64545, g);
+  put(new THREE.BoxGeometry(3.2, 0.2, 1.62), 0x2aa9d6, -0.4, 0.3, 0, g);     // blue stripe
+  put(new THREE.BoxGeometry(1.1, 0.8, 1.1), 0xf4f4f0, 0.2, 1.3, 0, g);       // wheelhouse
+  put(new THREE.BoxGeometry(1.12, 0.25, 1.12), 0x22313a, 0.2, 1.4, 0, g);    // windows
+  put(new THREE.CylinderGeometry(0.05, 0.05, 2, 5), 0xdddddd, -0.8, 1.9, 0, g); // mast
+  return g;
+}
+function makeRodModel() {
+  const g = new THREE.Group();
+  const stick = put(new THREE.CylinderGeometry(0.015, 0.04, 2.4, 6), 0x222222, 0, 0, 0, g);
+  stick.rotation.z = -0.9;
+  const reel = put(new THREE.CylinderGeometry(0.13, 0.13, 0.1, 12), 0x9a9a9a, -0.55, -0.48, 0.08, g);
+  reel.rotation.x = Math.PI / 2;
+  return g;
+}
+function makeFoodCan() {
+  const g = new THREE.Group();
+  put(new THREE.CylinderGeometry(0.3, 0.3, 0.8, 16), 0xf2a33a, 0, 0, 0, g);
+  put(new THREE.CylinderGeometry(0.31, 0.31, 0.06, 16), 0xe2601f, 0, 0.42, 0, g); // lid
+  put(new THREE.CylinderGeometry(0.305, 0.305, 0.3, 16), 0xfff1c4, 0, 0, 0, g);   // label
+  return g;
+}
+function makeTickets() {
+  const g = new THREE.Group();
+  for (const [x, y, r] of [[0, 0, 0.25], [0.1, -0.25, -0.1]]) {
+    const t = put(new THREE.BoxGeometry(1.2, 0.5, 0.02), 0x3aa2cc, x, y, 0, g);
+    t.rotation.z = r;
+  }
+  return g;
+}
+
+const pages = {};
+let shopPage = 'menu';
+const spinners = [];
+function page(name) {
+  const g = new THREE.Group();
+  g.visible = false;
+  shopScene.add(g);
+  return (pages[name] = g);
+}
+function showPage(name) {
+  shopPage = name;
+  for (const k in pages) pages[k].visible = k === name;
+  refreshShop();
+}
+
+// Top of every page: money, and Back
+const shopMoney = textPanel(1.3, 0.26);
+shopMoney.mesh.position.set(-1.45, E + 1.05, -3.2);
+shopScene.add(shopMoney.mesh);
+const shopBack = makeButton('Back', 0.6, 0.26, '#1f6fb2', () => (shopPage === 'menu' ? closeShop() : showPage('menu')));
+shopBack.position.set(1.7, E + 1.05, -3.15);
+shopScene.add(shopBack);
+
+// Menu
+const menuPage = page('menu');
+for (const m of [
+  { label: 'Vehicles', x: -1.1, y: E + 0.45, make: makeTrawler, go: () => showPage('vehicles') },
+  { label: 'Upgrades', x: 1.1, y: E + 0.45, make: makeRodModel, go: () => showPage('upgrades') },
+  { label: 'Food', x: -1.1, y: E - 0.85, make: makeFoodCan, go: () => showPage('food') },
+  { label: 'Plane tickets', x: 1.1, y: E - 0.85, make: makeTickets, go: () => say('Coming later!', 1.5), soon: true },
+]) {
+  const model = fitModel(m.make(), 0.7);
+  model.position.set(m.x, m.y, -3);
+  menuPage.add(model);
+  spinners.push(model);
+  const hit = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.9, 0.9), new THREE.MeshBasicMaterial({ visible: false }));
+  hit.position.copy(model.position);
+  hit.userData = { enabled: true, onClick: m.go };
+  clickables.push(hit);
+  menuPage.add(hit);
+  const b = makeButton(m.soon ? 'Plane tickets (later)' : m.label, 0.9, 0.2, m.soon ? '#55606a' : '#1f6fb2', m.go);
+  b.position.set(m.x, m.y - 0.5, -2.9);
+  menuPage.add(b);
+}
+
+// Vehicles: < model and stats >
+const vehPage = page('vehicles');
+const harbour = textPanel(2.1, 1.8, 256);         // sky and water behind the model
+{
+  const { g, c } = harbour, sky = g.createLinearGradient(0, 0, 0, c.height);
+  sky.addColorStop(0, '#9fd0f0'); sky.addColorStop(0.55, '#d6ecf7'); sky.addColorStop(0.56, '#3b87b8'); sky.addColorStop(1, '#1d5f8a');
+  g.fillStyle = sky; g.fillRect(0, 0, c.width, c.height);
+  g.strokeStyle = 'rgba(255,255,255,0.35)'; g.lineWidth = 2;
+  for (let i = 0; i < 14; i++) { const x = (i * 53) % c.width, y = c.height * 0.6 + (i * 37) % (c.height * 0.38); g.beginPath(); g.moveTo(x, y); g.lineTo(x + 30, y); g.stroke(); }
+}
+harbour.mesh.position.set(-0.85, E, -3.3);
+vehPage.add(harbour.mesh);
+const vehPivot = new THREE.Group();
+vehPivot.position.set(-0.85, E - 0.25, -3);
+vehPage.add(vehPivot);
+spinners.push(vehPivot);
+const vehModels = VEHICLES.map(v => fitModel(v.make(), 1.4));
+const vehInfo = textPanel(1.5, 1.8);
+vehInfo.mesh.position.set(0.95, E, -3.3);
+vehPage.add(vehInfo.mesh);
+let vehIndex = 0;
+const prevBtn = makeButton('<', 0.25, 0.4, '#1f6fb2', () => { vehIndex = (vehIndex + VEHICLES.length - 1) % VEHICLES.length; drawVehicle(); });
+prevBtn.position.set(-2.05, E, -3.2);
+const nextBtn = makeButton('>', 0.25, 0.4, '#1f6fb2', () => { vehIndex = (vehIndex + 1) % VEHICLES.length; drawVehicle(); });
+nextBtn.position.set(1.95, E, -3.2);
+const buyBtn = makeButton('Buy', 1, 0.26, '#3a9d4f', () => buyVehicle());
+buyBtn.position.set(0.95, E - 0.6, -3.25);
+vehPage.add(prevBtn, nextBtn, buyBtn);
+
+function fuelCost() { return Math.ceil((FUEL_TANK - records.fuel) * FUEL_PRICE); }
+function drawVehicle() {
+  const v = VEHICLES[vehIndex], p = vehInfo, g = p.g, W = p.c.width;
+  vehPivot.clear();
+  vehPivot.add(vehModels[vehIndex]);
+  panelBg(p, '#000');
+  g.textAlign = 'center'; g.fillStyle = '#fff'; g.font = 'bold 50px sans-serif';
+  g.fillText(v.name, W / 2, 80);
+  const q = x => (v.locked ? '???' : x);
+  const rows = [['Price', q('$' + v.price)], ['Km/L', q(v.kmL || 'NA')], ['Top speed', q(v.kph + ' km/h')], ['Max carry', q(v.carry + ' kg')]];
+  g.font = '32px sans-serif';
+  rows.forEach(([k, val], i) => {
+    g.textAlign = 'left'; g.fillText(k, 36, 190 + i * 56);
+    g.textAlign = 'right'; g.fillText(val, W - 36, 190 + i * 56);
+  });
+  g.textAlign = 'center'; g.font = '28px sans-serif'; g.fillStyle = '#ffcc00';
+  const owned = records.boats.includes(v.id);
+  if (v.locked) { g.fillText('Locked! Catch every fish at', W / 2, 460); g.fillText('the Dock and on the River', W / 2, 500); }
+  else if (owned && v.kmL) g.fillText(`You own it. Fuel ${records.fuel.toFixed(1)} / ${FUEL_TANK} L`, W / 2, 460);
+  else if (owned) g.fillText('You own it', W / 2, 460);
+  else if (!v.kmL) g.fillText('No fuel needed: you row it', W / 2, 460);
+  else g.fillText(`Fuel $${FUEL_PRICE.toFixed(2)} a litre`, W / 2, 460);
+  p.tex.needsUpdate = true;
+  // Buy button: green if you can afford it, grey if not
+  buyBtn.visible = !v.locked;
+  if (v.locked) return;
+  if (!owned) setButton(buyBtn, `Buy  $${v.price}`, '#3a9d4f', records.money >= v.price);
+  else if (records.boat !== v.id) setButton(buyBtn, 'Use this one', '#3a9d4f', true);
+  else if (v.kmL && records.fuel < FUEL_TANK - 0.1) setButton(buyBtn, `Fill fuel  $${fuelCost()}`, '#3a9d4f', records.money >= fuelCost());
+  else setButton(buyBtn, v.kmL ? 'Fuel full' : 'Your boat', '#3a9d4f', false);
+}
+function buyVehicle() {
+  const v = VEHICLES[vehIndex];
+  if (!records.boats.includes(v.id)) {
+    records.money -= v.price;
+    records.boats.push(v.id);
+    records.boat = v.id;
+    if (v.kmL) records.fuel = FUEL_TANK;         // comes with a full tank
+    say(`You bought the ${v.name}!`, 2.5);
+  } else if (records.boat !== v.id) {
+    records.boat = v.id;
+    say(`Taking the ${v.name}`, 1.5);
+  } else {
+    records.money -= fuelCost();
+    records.fuel = FUEL_TANK;
+    say('Fuel tank full', 1.5);
+  }
+  saveRecords();
+  refreshShop();
+}
+
+// Upgrades: three rows, each with a buy button
+const upPage = page('upgrades');
+const upInfo = textPanel(2.8, 1.5, 1024);
+upInfo.mesh.position.set(0, E, -3.3);
+upPage.add(upInfo.mesh);
+const UP_ROWS = [0.3, -0.12, -0.54];             // heights of the rows (from the middle of the panel)
+const upBtns = UPGRADES.map((u, i) => {
+  const b = makeButton('', 0.6, 0.22, '#3a9d4f', () => {
+    records.money -= u.prices[u.level()];
+    u.buy();
+    applyGear();
+    saveRecords();
+    say(`${u.name} upgraded!`, 1.5);
+    refreshShop();
+  });
+  b.position.set(0.95, E + UP_ROWS[i], -3.25);
+  upPage.add(b);
+  return b;
+});
+function drawUpgrades() {
+  const p = upInfo, g = p.g, toY = off => (0.75 - off) / 1.5 * p.c.height;
+  panelBg(p, '#000');
+  g.textAlign = 'center'; g.fillStyle = '#fff'; g.font = 'bold 56px sans-serif';
+  g.fillText('Upgrades', 512, 70);
+  g.textAlign = 'left';
+  UPGRADES.forEach((u, i) => {
+    const l = u.level(), max = l >= u.prices.length, y = toY(UP_ROWS[i]);
+    g.fillStyle = '#fff'; g.font = 'bold 48px sans-serif';
+    g.fillText(`${u.name}  (level ${l + 1} of ${u.prices.length + 1})`, 40, y - 8);
+    g.fillStyle = '#9fb8c8'; g.font = '36px sans-serif';
+    g.fillText(u.info(l) + (max ? '' : `  >  ${u.info(l + 1)}`), 40, y + 40);
+    setButton(upBtns[i], max ? 'Maxed' : `$${u.prices[l]}`, '#3a9d4f', !max && records.money >= u.prices[l]);
+  });
+  p.tex.needsUpdate = true;
+}
+
+// Food
+const foodPage = page('food');
+const can = fitModel(makeFoodCan(), 0.9);
+can.position.set(-1, E - 0.1, -3);
+foodPage.add(can);
+spinners.push(can);
+const foodInfo = textPanel(1.7, 1.1);
+foodInfo.mesh.position.set(0.8, E + 0.2, -3.3);
+foodPage.add(foodInfo.mesh);
+const foodBtns = [[10, 10], [50, 40]].map(([n, price], i) => {
+  const b = makeButton('', 0.9, 0.22, '#3a9d4f', () => {
+    records.money -= price;
+    records.food += n;
+    saveRecords();
+    say(`+${n} food`, 1.2);
+    refreshShop();
+  });
+  b.userData.n = n; b.userData.price = price;
+  b.position.set(0.8, E - 0.55 - i * 0.3, -3.25);
+  foodPage.add(b);
+  return b;
+});
+function drawFood() {
+  const p = foodInfo, g = p.g;
+  panelBg(p, '#000');
+  g.textAlign = 'center'; g.fillStyle = '#fff'; g.font = 'bold 46px sans-serif';
+  g.fillText('Fish food', 256, 70);
+  g.fillStyle = '#ffcc00'; g.font = '36px sans-serif';
+  g.fillText(`You have ${records.food} feeds`, 256, 135);
+  g.fillStyle = '#9fb8c8'; g.font = '26px sans-serif';
+  g.fillText('One feed keeps a fish full', 256, 200);
+  g.fillText('for a day. Fish die after', 256, 238);
+  g.fillText('3 days without food.', 256, 276);
+  p.tex.needsUpdate = true;
+  for (const b of foodBtns) setButton(b, `${b.userData.n} feeds  $${b.userData.price}`, '#3a9d4f', records.money >= b.userData.price);
+}
+
+function refreshShop() {
+  panelBg(shopMoney, 'rgba(16,32,44,0.9)');
+  shopMoney.g.fillStyle = '#ffcc00'; shopMoney.g.font = 'bold 48px sans-serif'; shopMoney.g.textBaseline = 'middle';
+  shopMoney.g.fillText(`Money: $${records.money}`, 24, shopMoney.c.height / 2 + 2);
+  shopMoney.tex.needsUpdate = true;
+  if (shopPage === 'vehicles') drawVehicle();
+  if (shopPage === 'upgrades') drawUpgrades();
+  if (shopPage === 'food') drawFood();
+}
+function openShop() {
+  deselectFish();
+  state = 'shop';
+  shopScene.add(head);
+  head.position.set(0, E, 0);
+  activeScene = shopScene;
+  showPage('menu');
+}
+function closeShop() {
+  aquaScene.add(head);
+  head.position.set(0, E, 1.2);
+  activeScene = aquaScene;
+  state = 'aquarium';
+  fillTank();                                    // the tank might be bigger now
+}
+let lastShopT = 0;
+function updateShop(t) {
+  const dt = Math.min(0.1, t - lastShopT);
+  lastShopT = t;
+  if (activeScene !== shopScene) return;
+  for (const s of spinners) s.rotation.y += 0.5 * dt;
+}
+
+// ---------- Your boat ----------
+// "Take the boat" under the catch log. Push a stick to drive (forward/back = go, left/right = steer).
+// The boat turns under you; you can still look anywhere. Fish you keep go in the boat
+// until you get back on the jetty, then they go into the tank.
+let onBoat = false, boatModel = null, boatHeading = Math.PI / 2, boatSpeed = 0;
+const boatPos = new THREE.Vector2();             // x and z on the river
+const boatBtn = makeButton('Take the boat', 0.6, 0.16, '#3a9d4f', () => boardBoat());
+boatBtn.position.set(0, -0.82, 0.01);
+board.add(boatBtn);
+// Dashboard down to your left: speed, fuel, fish on board, and the way back onto the jetty
+const dash = new THREE.Group();
+dash.position.set(-0.42, -0.72, -0.75);
+dash.rotation.set(-0.7, 0.4, 0);
+dash.visible = false;
+body.add(dash);
+const dashInfo = textPanel(0.44, 0.22, 384);
+dash.add(dashInfo.mesh);
+const dockBtn = makeButton('', 0.44, 0.1, '#1f6fb2', () => leaveBoat());
+dockBtn.position.set(0, -0.17, 0.001);
+dash.add(dockBtn);
+for (const m of [dashInfo.mesh, dockBtn]) { m.material.depthTest = false; m.renderOrder = 12; }
+
+const nearJetty = () => Math.hypot(boatPos.x, boatPos.y + 4) < 12;
+function boardBoat() {
+  if (state !== 'ready') { say('Reel in first', 1.5); return; }
+  boatModel = vehicle().make();
+  scene.add(boatModel);
+  boatPos.set(3, -5);
+  boatHeading = Math.PI / 2;                     // pointing out into the river
+  boatSpeed = 0;
+  onBoat = true;
+  dash.visible = true;
+  say('Push a stick to drive', 2.5);
+}
+function leaveBoat() {
+  if (!nearJetty()) {                            // out of fuel, far away: someone tows you back
+    const cost = Math.min(20, records.money);
+    records.money -= cost;
+    say(cost ? `Towed back for $${cost}` : 'Towed back for free', 2.5);
+  }
+  onBoat = false;
+  dash.visible = false;
+  scene.remove(boatModel);
+  head.position.set(0, EYE_HEIGHT, 0);
+  // Unload the fish into the tank (as many as fit)
+  let moved = 0;
+  while (records.hold.length && records.tank.length < records.tankSize) {
+    const r = records.hold.shift();
+    r.fed = Date.now();
+    records.tank.push(r);
+    moved++;
+  }
+  if (records.hold.length) say(`Tank full! ${records.hold.length} still in the boat`, 3);
+  else if (moved) say(`${moved} fish into the tank`, 2.5);
+  saveRecords();
+}
+function drawDash(v) {
+  const p = dashInfo, g = p.g;
+  panelBg(p, 'rgba(16,32,44,0.9)');
+  g.textAlign = 'left'; g.fillStyle = '#fff'; g.font = 'bold 34px sans-serif';
+  g.fillText(`${v.name}  ${Math.round(Math.abs(boatSpeed) * 3.6)} km/h`, 18, 48);
+  g.font = '30px sans-serif';
+  if (v.kmL) { g.fillStyle = records.fuel < 3 ? '#ff6b5e' : '#fff'; g.fillText(`Fuel ${records.fuel.toFixed(1)} L`, 18, 100); }
+  g.fillStyle = holdKg() > v.carry * 0.9 ? '#ff6b5e' : '#fff';
+  g.fillText(`Fish ${holdKg().toFixed(1)} / ${v.carry} kg`, 18, 150);
+  p.tex.needsUpdate = true;
+  const label = nearJetty() ? 'Back on the jetty' : v.kmL && records.fuel <= 0 ? 'Out of fuel: get towed' : 'Drive back to the jetty';
+  if (dockBtn.userData.label !== label) {
+    dockBtn.userData.label = label;
+    setButton(dockBtn, label, '#1f6fb2', label !== 'Drive back to the jetty');
+  }
+  saveRecords();                                 // keeps your fuel level
+}
+let lastBoatT = 0, lastDash = 0;
+function updateBoat(t) {
+  const dt = Math.min(0.1, t - lastBoatT);
+  lastBoatT = t;
+  boatBtn.visible = !!records.boat && !onBoat;
+  if (boatBtn.visible && boatBtn.userData.label !== records.boat) {
+    boatBtn.userData.label = records.boat;
+    setButton(boatBtn, `Take the ${vehicle().name}`, '#3a9d4f', true);
+  }
+  if (!onBoat) return;
+  const v = vehicle(), top = v.kph / 3.6;        // km/h to metres per second
+  // Only drive while the line's in, and not with an empty fuel tank
+  const canDrive = state === 'ready' && !(v.kmL && records.fuel <= 0);
+  const pushed = Math.hypot(stickX, stickY) > 0.25 && canDrive;
+  const throttle = pushed ? -stickY : 0, steer = pushed ? stickX : 0;
+  boatSpeed += (throttle * top - boatSpeed) * Math.min(1, dt * 0.8);   // speeds up and coasts to a stop
+  boatHeading -= steer * 0.8 * dt * Math.min(1, 0.3 + Math.abs(boatSpeed) / 3);
+  const dx = Math.cos(boatHeading) * boatSpeed * dt, dz = -Math.sin(boatHeading) * boatSpeed * dt;
+  // Stay on the river: not past the islands, not onto the bank or the jetties
+  boatPos.x = Math.max(-290, Math.min(290, boatPos.x + dx));
+  boatPos.y = Math.max(-150, Math.min(-4, boatPos.y + dz));
+  if (v.kmL) records.fuel = Math.max(0, records.fuel - Math.hypot(dx, dz) / 1000 / v.kmL);
+  boatModel.position.set(boatPos.x, waveY(boatPos.x, boatPos.y, t) * 0.5 - 0.25, boatPos.y);
+  boatModel.rotation.set(Math.sin(t * 0.9) * 0.02, boatHeading, Math.sin(t * 0.7) * 0.03 + Math.min(0.08, Math.abs(boatSpeed) * 0.01));
+  // You sit just behind the middle
+  head.position.set(boatPos.x - Math.cos(boatHeading) * 0.5, boatModel.position.y + 1.3, boatPos.y + Math.sin(boatHeading) * 0.5);
+  if (t - lastDash > 0.25) { lastDash = t; drawDash(v); }
+}
 
 // ---------- Head tracking (phone gyro) ----------
 // Converts the phone's orientation angles into a rotation for the head.
@@ -1631,19 +2139,23 @@ function frame() {
   const t = clock.getElapsedTime();
 
   // Waves
+  // (the wavy patch moves with you in 5 m steps, so there are waves wherever you drive)
+  water.position.set(Math.round(head.position.x / 5) * 5, 0, Math.round(head.position.z / 5) * 5);
   const pos = waterGeo.attributes.position.array;
   for (let i = 0; i < pos.length; i += 3) {
     const x = waterBase[i], z = waterBase[i + 2];
-    pos[i + 1] = waveY(x, z, t);
+    pos[i + 1] = waveY(x + water.position.x, z + water.position.z, t);
   }
   waterGeo.attributes.position.needsUpdate = true;
 
   if (!updateHeadFromGyro()) head.rotation.set(mousePitch, mouseYaw, 0, 'YXZ');
   head.updateMatrixWorld();
   pollPad(t);
+  updateBoat(t);
   updateFishing(t);
   updateWildlife(t);
   updateAquarium(t);
+  updateShop(t);
   updatePointer();
 
   // Render twice: left half of the screen for the left eye, right half for the right

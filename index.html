@@ -29,6 +29,7 @@
   <button id="go" disabled>Loading…</button>
   <p id="msg"></p>
   <p>Hold the screen (or headset button) to charge a cast, let go to throw it where you're looking. When the bobber gets pulled under, tap fast to hook the fish. Then hold to reel in, and let go when the bar goes red or the line snaps. Hold with no fish on to wind back in. Tap to close the catch screen. Your catch log is on your left. Two-finger tap re-centres.</p>
+  <p>Joy-Cons: hold ZR or R to cast, press it to hook, spin the right stick in circles to reel, + re-centres.</p>
 </div>
 <div id="divider"></div>
 
@@ -292,7 +293,7 @@ function hookFish(t) {
   const dx = bobber.position.x - head.position.x, dz = bobber.position.z - head.position.z;
   fish.dist = Math.hypot(dx, dz);
   fish.angle = Math.atan2(-dx, -dz);
-  fish.nextSurge = t + 1 + Math.random() * 2;
+  fish.nextSurge = t + surgeGap();
   fish.surgeUntil = 0;
   fish.wiggle = Math.random() * 10;
   tension = 0.2;
@@ -300,6 +301,9 @@ function hookFish(t) {
   state = 'fighting';
   say('Fish on!', 1.5);
 }
+// Rarer, tougher fish surge more often and for longer
+function surgeGap() { return (1.5 + Math.random() * 3) / fish.type.fight; }
+
 function endFight(t, text, next) {
   say(text, 3);
   tension = 0;
@@ -391,9 +395,9 @@ function closeCatch() {
   state = 'ready';
 }
 
-function press(now) {
+function press(now, fromPad) {
   if (!playing) return;
-  held = true;
+  held = !fromPad; // on a controller you wind with the stick instead
   if (state === 'ready') { state = 'charging'; chargeStart = now; power = 0; }
   else if (state === 'floating' && now - biteStart < BITE_WINDOW) hookFish(now);
   else if (state === 'showing') { closeCatch(); held = false; } // don't start winding on the same tap
@@ -419,20 +423,56 @@ addEventListener('touchend', e => { if (e.touches.length === 0) release(clock.ge
 // On the PC: space bar
 addEventListener('keydown', e => { if (e.code === 'Space' && !e.repeat) press(clock.getElapsedTime()); });
 addEventListener('keyup', e => { if (e.code === 'Space') release(clock.getElapsedTime()); });
-// Controller: button 0 (A on most pads), checked every frame
-let padWasDown = false;
+// ---------- Controller (Joy-Cons) ----------
+// Checked every frame. ZR or R = cast / hook / close the catch screen,
+// spin the right stick in circles = wind the reel, + = re-centre.
+// (Standard button numbers: 5 = R, 7 = ZR, 9 = +. Button 0 kept for other pads.)
+const CAST_BUTTONS = [5, 7, 0];
+let padWasDown = false, plusWasDown = false;
+let crankAngle = null, crankSpeed = 0; // crankSpeed = stick turns per second (smoothed)
+let lastPadT = 0, padStatus = '';
 function pollPad(now) {
+  const dt = Math.min(0.1, now - lastPadT);
+  lastPadT = now;
   const pads = navigator.getGamepads ? [...navigator.getGamepads()].filter(Boolean) : [];
-  const down = pads.some(p => p.buttons[0] && p.buttons[0].pressed);
-  if (down && !padWasDown) press(now);
+  const isDown = i => pads.some(p => p.buttons[i] && p.buttons[i].pressed);
+  const down = CAST_BUTTONS.some(isDown);
+  if (down && !padWasDown) press(now, true);
   if (!down && padWasDown) release(now);
   padWasDown = down;
+  const plus = isDown(9);
+  if (plus && !plusWasDown) recentre();
+  plusWasDown = plus;
+
+  // Crank: how fast is the right stick going round in circles?
+  let rate = 0;
+  const p = pads[0];
+  if (p) {
+    const [x, y] = p.axes.length >= 4 ? [p.axes[2], p.axes[3]] : [p.axes[0] || 0, p.axes[1] || 0];
+    if (Math.hypot(x, y) > 0.6) {          // stick pushed out to the edge
+      const ang = Math.atan2(y, x);
+      if (crankAngle !== null && dt > 0) {
+        let d = ang - crankAngle;
+        if (d > Math.PI) d -= 2 * Math.PI;   // take the short way round
+        if (d < -Math.PI) d += 2 * Math.PI;
+        rate = Math.abs(d) / (2 * Math.PI) / dt;
+      }
+      crankAngle = ang;
+    } else crankAngle = null;
+  }
+  crankSpeed += (rate - crankSpeed) * Math.min(1, dt * 8); // smooth out the jitter
+
+  // Show what's connected (and which buttons are down) on the catch log, to help set up
+  const status = p ? p.id.slice(0, 26) + '  ' + p.buttons.map((b, i) => b.pressed ? i : null).filter(i => i !== null).join(' ') : 'No controller';
+  if (status !== padStatus) { padStatus = status; drawLog(); }
 }
 
 let lastT = 0;
 function updateFishing(t) {
   const dt = Math.min(0.1, t - lastT); // seconds since last frame
   lastT = t;
+  // Holding the screen / space = full-speed winding; otherwise however fast you spin the stick
+  const reel = held ? 1 : Math.min(1, crankSpeed);
   // Turn the body (and rod) to match where your head faces
   const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(head.quaternion);
   body.rotation.y = Math.atan2(-fwd.x, -fwd.z);
@@ -465,12 +505,12 @@ function updateFishing(t) {
   }
   if (state === 'floating') {
     let y = waveY(bobber.position.x, bobber.position.z, t) + 0.02;
-    if (held) {
+    if (reel > 0.05) {
       // Winding the empty line back in
       const toTip = new THREE.Vector3().subVectors(tipPos, bobber.position);
       toTip.y = 0;
       if (toTip.length() < 1.2) state = 'ready';
-      else bobber.position.addScaledVector(toTip.normalize(), 4 * dt);
+      else bobber.position.addScaledVector(toTip.normalize(), 4 * reel * dt);
       nextNibble = Math.max(nextNibble, t + 2); // fish won't bite a moving bobber
       biteStart = -10;
     } else if (biteStart > 0) {
@@ -488,22 +528,20 @@ function updateFishing(t) {
   }
   if (state === 'fighting') {
     if (t > fish.nextSurge) {
-      fish.surgeUntil = t + 0.8 + Math.random();
-      fish.nextSurge = fish.surgeUntil + 2 + Math.random() * 3;
+      fish.surgeUntil = t + (0.6 + Math.random()) * fish.type.fight;
+      fish.nextSurge = fish.surgeUntil + surgeGap();
       splashAt(bobber.position, t);
     }
     // How hard the fish pulls right now: harder in a surge, weaker as it tires
     const pull = fish.strength * (surging ? 1 : 0.45) * (0.4 + 0.6 * fish.stamina);
-    if (held) {
-      fish.dist -= 2.2 * (1 - pull * 0.6) * dt;
-      tension += (pull * 0.9 - 0.15) * dt;
-      fish.stamina = Math.max(0, fish.stamina - 0.07 * dt);
-    } else {
-      fish.dist += pull * 1.2 * dt;  // fish swims off and pulls line out
-      tension -= 0.5 * dt;
-    }
+    // reel = how hard you're winding, 0 (not at all) to 1 (full speed)
+    // Winding pulls the fish in but builds tension; a weak fish barely builds any.
+    // Not winding lets tension drop, but the fish swims off with line.
+    fish.dist -= (2.2 * (1 - pull * 0.6) * reel - pull * 1.2 * (1 - reel)) * dt;
+    tension += ((pull * 1.1 - 0.2) * reel - 0.5 * (1 - reel)) * dt;
+    fish.stamina = Math.max(0, fish.stamina - (0.1 / fish.type.fight) * reel * dt); // tough fish tire slower
     tension = Math.max(0, tension);
-    if (held || tension > 0.05) slackSince = t;
+    if (reel > 0.05 || tension > 0.05) slackSince = t;
     // Fish swims side to side
     fish.angle += Math.sin(t * 0.8 + fish.wiggle) * 0.08 * fish.strength * (surging ? 3 : 1) * dt;
     bobber.position.set(head.position.x - Math.sin(fish.angle) * fish.dist, -0.15, head.position.z - Math.cos(fish.angle) * fish.dist);
@@ -682,6 +720,8 @@ function drawLog() {
     bctx.fillText(kg === undefined ? '' : kg.toFixed(2) + ' kg', 488, 145 + i * 38);
     bctx.textAlign = 'left';
   });
+  bctx.fillStyle = '#5d7383'; bctx.font = '18px sans-serif';
+  bctx.fillText(padStatus, 24, 368);
   boardTex.needsUpdate = true;
 }
 drawLog();

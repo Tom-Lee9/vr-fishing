@@ -8,7 +8,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="VR Fishing">
-<title>VR Fishing</title>
+<title>VR Fishing - Noosa River</title>
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; touch-action: none; }
   canvas { display: block; }
@@ -24,7 +24,7 @@
 </head>
 <body>
 <div id="start">
-  <h1>🎣 VR Fishing</h1>
+  <h1>🎣 VR Fishing: Noosa River</h1>
   <p>Turn your phone sideways. Tap Start, allow motion access, then slide it into the headset.</p>
   <button id="go" disabled>Loading…</button>
   <p id="msg"></p>
@@ -58,79 +58,162 @@ document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x9fd3f0);
-scene.fog = new THREE.Fog(0x9fd3f0, 40, 160);
+scene.fog = new THREE.Fog(0x9fd3f0, 120, 650);
 
 // "head" is where you are; the two eye cameras sit inside it, one each side
 const head = new THREE.Object3D();
 head.position.set(0, EYE_HEIGHT, 0);
 scene.add(head);
-const leftEye  = new THREE.PerspectiveCamera(90, 1, 0.05, 300);
-const rightEye = new THREE.PerspectiveCamera(90, 1, 0.05, 300);
+const leftEye  = new THREE.PerspectiveCamera(90, 1, 0.05, 800);
+const rightEye = new THREE.PerspectiveCamera(90, 1, 0.05, 800);
 leftEye.position.x  = -EYE_GAP / 2;
 rightEye.position.x =  EYE_GAP / 2;
 head.add(leftEye, rightEye);
 
 // ---------- Lights ----------
-scene.add(new THREE.HemisphereLight(0xcfeaff, 0x3a5a2a, 1.1));
+scene.add(new THREE.HemisphereLight(0xcfeaff, 0x5a6a4a, 1.1));
 const sun = new THREE.DirectionalLight(0xffffff, 1.6);
 sun.position.set(30, 50, -20);
 scene.add(sun);
 
-// ---------- World ----------
-// Water: a big plane whose vertices bob up and down each frame
+// ---------- World: Noosa River at Gympie Terrace, Noosaville ----------
+// You're at the end of a jetty. The river runs left-right in front of you,
+// the park, Gympie Terrace and the cafés are behind you, and low mangrove
+// islands line the far side.
+let seed = 7;
+const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+// One shared material per colour (shared materials let us merge scenery later)
+const matCache = {};
+function mat(color) {
+  return matCache[color] || (matCache[color] = new THREE.MeshLambertMaterial({ color, flatShading: true }));
+}
+// Anything that never moves goes in "scenery", which gets merged into a few big meshes at the end
+const scenery = new THREE.Group();
+function put(geo, color, x, y, z, parent = scenery) {
+  const m = new THREE.Mesh(geo, mat(color));
+  m.position.set(x, y, z);
+  parent.add(m);
+  return m;
+}
+
+// Water: the patch near you has moving waves; a big flat sheet underneath reaches the far bank
+const WATER = 0x2a7d80;
 const waterGeo = new THREE.PlaneGeometry(300, 300, 60, 60);
 waterGeo.rotateX(-Math.PI / 2);
 const water = new THREE.Mesh(waterGeo, new THREE.MeshPhongMaterial({
-  color: 0x1f6e8c, shininess: 90, specular: 0x99ccff, flatShading: true, transparent: true, opacity: 0.92
+  color: WATER, shininess: 90, specular: 0x99ccff, flatShading: true, transparent: true, opacity: 0.92
 }));
 scene.add(water);
 const waterBase = waterGeo.attributes.position.array.slice();
+const farWater = new THREE.Mesh(new THREE.PlaneGeometry(1600, 1600), new THREE.MeshLambertMaterial({ color: WATER }));
+farWater.rotation.x = -Math.PI / 2;
+farWater.position.y = -0.15;
+scene.add(farWater);
 
-// Dock you're standing on
-const wood = new THREE.MeshLambertMaterial({ color: 0x8b5a2b });
-const dock = new THREE.Mesh(new THREE.BoxGeometry(3, 0.2, 10), wood);
-dock.position.set(0, 0.4, 3);
-scene.add(dock);
-for (const x of [-1.3, 1.3]) for (const z of [-1.5, 3, 7.5]) {
-  const post = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 2), wood);
-  post.position.set(x, -0.3, z);
-  scene.add(post);
+// The jetty you're standing on (runs from the bank out to z = -2)
+const WOOD = 0x8b6a45;
+const dock = put(new THREE.BoxGeometry(2.4, 0.2, 12), WOOD, 0, 0.4, 4);
+for (const z of [-1.8, 2, 6, 9.5]) for (const x of [-1.25, 1.25]) {
+  const h = 2.1;
+  put(new THREE.CylinderGeometry(0.13, 0.13, h, 8), 0x6e5236, x, -1.2 + h / 2, z);
 }
 
-// Shoreline ring of hills and trees, so you have things at lots of distances
-// (that's what makes the 3D depth obvious)
-const grass = new THREE.MeshLambertMaterial({ color: 0x4f8a3a, flatShading: true });
-const trunkMat = new THREE.MeshLambertMaterial({ color: 0x5a3a1e });
-const leafMat = new THREE.MeshLambertMaterial({ color: 0x2f6b2f, flatShading: true });
-let seed = 7;
-const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
-for (let i = 0; i < 40; i++) {
-  const a = (i / 40) * Math.PI * 2;
-  const r = 70 + rand() * 30;
-  const hill = new THREE.Mesh(new THREE.ConeGeometry(12 + rand() * 14, 8 + rand() * 18, 7), grass);
-  hill.position.set(Math.cos(a) * r, 0, Math.sin(a) * r);
-  scene.add(hill);
+// The bank behind you: beach, park, path, Gympie Terrace, footpath, shops
+const beach = put(new THREE.BoxGeometry(700, 0.6, 9), 0xe3d3a0, 0, -0.1, 11);
+beach.rotation.x = -0.05;               // slopes down into the water
+put(new THREE.BoxGeometry(700, 1, 36), 0x5f9a45, 0, 0.2, 33);           // grass
+put(new THREE.BoxGeometry(700, 0.05, 2), 0xd8d2c4, 0, 0.72, 24);        // riverside path
+put(new THREE.BoxGeometry(700, 0.05, 9), 0x3b3f44, 0, 0.72, 55);        // the road
+for (let x = -340; x < 340; x += 6) put(new THREE.BoxGeometry(3, 0.06, 0.15), 0xf4f4f0, x, 0.73, 55); // centre line
+put(new THREE.BoxGeometry(700, 1.1, 4), 0xcfc8b8, 0, 0.25, 61.5);       // footpath
+put(new THREE.BoxGeometry(700, 1, 40), 0x8f8a80, 0, 0.2, 84);           // ground under the shops
+
+// Shops and cafés: pastel buildings with coloured awnings and dark windows
+const WALLS = [0xf2efe6, 0xe8d8b8, 0xcfe3e8, 0xf0d2c0, 0xdde8cf, 0xffffff];
+const AWNINGS = [0x2a9df4, 0xe85d4a, 0x3a8f5a, 0xf2b134, 0x333333, 0x1f4e79];
+for (let x = -250; x < 250;) {
+  const w = 8 + rand() * 10, h = 4 + rand() * 6;
+  const cx = x + w / 2;
+  put(new THREE.BoxGeometry(w, h, 12), WALLS[Math.floor(rand() * WALLS.length)], cx, 0.7 + h / 2, 70);
+  put(new THREE.BoxGeometry(w * 0.85, 1.6, 0.1), 0x22313a, cx, 2.1, 63.95);           // shop window
+  if (h > 7) put(new THREE.BoxGeometry(w * 0.85, 1.2, 0.1), 0x22313a, cx, 5.4, 63.95); // upstairs
+  const awning = put(new THREE.BoxGeometry(w, 0.15, 2.6), AWNINGS[Math.floor(rand() * AWNINGS.length)], cx, 3.4, 62.7);
+  awning.rotation.x = 0.15;
+  x += w + 0.5 + rand() * 3;
 }
-function tree(x, z, s) {
-  const t = new THREE.Group();
-  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.15 * s, 0.2 * s, 1.5 * s), trunkMat);
-  trunk.position.y = 0.75 * s;
-  const leaves = new THREE.Mesh(new THREE.ConeGeometry(1.2 * s, 3 * s, 7), leafMat);
-  leaves.position.y = 2.8 * s;
-  t.add(trunk, leaves);
-  t.position.set(x, 0, z);
-  scene.add(t);
+
+// Park trees: big shady ones and palms
+function shadeTree(x, z, s) {
+  put(new THREE.CylinderGeometry(0.25 * s, 0.4 * s, 3.2 * s, 7), 0x5a4330, x, 0.7 + 1.6 * s, z);
+  for (let i = 0; i < 4; i++) {
+    const c = put(new THREE.IcosahedronGeometry(2.2 * s, 0), rand() < 0.5 ? 0x3f7a35 : 0x4d8a3c,
+      x + (rand() - 0.5) * 3 * s, 0.7 + (4 + rand() * 1.5) * s, z + (rand() - 0.5) * 3 * s);
+    c.scale.y = 0.75;
+  }
 }
-// Behind you on the bank
-const bank = new THREE.Mesh(new THREE.BoxGeometry(60, 1, 20), grass);
-bank.position.set(0, 0, 17);
-scene.add(bank);
-for (let i = 0; i < 25; i++) tree(-28 + rand() * 56, 9 + rand() * 15, 0.8 + rand() * 0.8);
-// A small island out in the lake
-const island = new THREE.Mesh(new THREE.CylinderGeometry(6, 8, 1.5, 9), grass);
-island.position.set(-18, 0, -35);
-scene.add(island);
-for (let i = 0; i < 6; i++) tree(-18 + (rand() - .5) * 8, -35 + (rand() - .5) * 8, 0.9 + rand() * 0.5);
+function palm(x, z, s) {
+  const lean = (rand() - 0.5) * 0.3;
+  const trunk = put(new THREE.CylinderGeometry(0.15 * s, 0.22 * s, 7 * s, 6), 0x8a7458, x, 0.7 + 3.5 * s, z);
+  trunk.rotation.z = lean;
+  const topX = x - Math.sin(lean) * 3.5 * s, topY = 0.7 + 7 * s;
+  for (let i = 0; i < 7; i++) {
+    const a = (i / 7) * Math.PI * 2;
+    const f = put(new THREE.SphereGeometry(1, 6, 4), 0x4f8a3a, topX + Math.cos(a) * 1.4 * s, topY - 0.3 * s, z + Math.sin(a) * 1.4 * s);
+    f.scale.set(1.6 * s, 0.12 * s, 0.4 * s);
+    f.rotation.set(0, -a, -0.35);      // fronds point outward and droop
+  }
+}
+for (let i = 0; i < 55; i++) {
+  const x = -180 + rand() * 360, z = 15 + rand() * 33;
+  if (Math.abs(x) < 4 && z < 30) continue; // keep the end of the jetty clear
+  if (Math.abs(z - 24) < 2) continue;      // not on the path
+  if (rand() < 0.3) palm(x, z, 0.9 + rand() * 0.4); else shadeTree(x, z, 0.9 + rand() * 0.6);
+}
+for (let i = 0; i < 8; i++) {           // picnic tables
+  const x = -60 + rand() * 120, z = 28 + rand() * 12;
+  put(new THREE.BoxGeometry(1.8, 0.08, 0.8), WOOD, x, 1.45, z);
+  put(new THREE.BoxGeometry(1.8, 0.06, 0.3), WOOD, x, 1.15, z - 0.65);
+  put(new THREE.BoxGeometry(1.8, 0.06, 0.3), WOOD, x, 1.15, z + 0.65);
+}
+
+// Other jetties along the bank (boats get tied up at them further down)
+const SIDE_JETTIES = [-95, -45, 40, 85];
+for (const jx of SIDE_JETTIES) {
+  put(new THREE.BoxGeometry(2, 0.2, 10), WOOD, jx, 0.4, 3);
+  for (const z of [-1.5, 3, 7.5]) for (const dx of [-1, 1]) put(new THREE.CylinderGeometry(0.12, 0.12, 2.2, 6), 0x6e5236, jx + dx, -0.4, z);
+}
+
+// Across the river: low islands edged with mangroves, and hills in the distance
+for (let i = 0; i < 8; i++) {
+  const ix = -480 + i * 130 + rand() * 40, iz = -175 - rand() * 35;
+  const w = 40 + rand() * 45, d = 18 + rand() * 12;
+  const isl = put(new THREE.SphereGeometry(1, 16, 8), 0x46703a, ix, -1.2, iz);
+  isl.scale.set(w, 4 + rand() * 4, d);
+  // Mangroves: dark green clumps right along the water's edge
+  for (let k = 0; k < 22; k++) {
+    const a = rand() * Math.PI * 2;
+    const m = put(new THREE.IcosahedronGeometry(3 + rand() * 2.5, 0), rand() < 0.5 ? 0x2f5a2c : 0x365f30,
+      ix + Math.cos(a) * w * 0.95, 1, iz + Math.sin(a) * d * 0.95);
+    m.scale.y = 0.6;
+  }
+  for (let k = 0; k < 6; k++) put(new THREE.IcosahedronGeometry(4 + rand() * 3, 0), 0x3c6b35, ix + (rand() - 0.5) * w, 4 + rand() * 3, iz + (rand() - 0.5) * d * 0.8);
+}
+for (let i = 0; i < 12; i++) {
+  const hill = put(new THREE.SphereGeometry(1, 12, 6), 0x5d7f62, -600 + i * 110 + rand() * 50, -5, -520 - rand() * 120);
+  hill.scale.set(70 + rand() * 60, 25 + rand() * 45, 50 + rand() * 30);
+}
+
+// Sandbanks: pale patches just under the surface (see-through, drawn after the water)
+const sandMat = new THREE.MeshBasicMaterial({ color: 0xd9c68f, transparent: true, opacity: 0.4, depthWrite: false,
+  polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 });
+for (const [x, z, w, d] of [[-70, -75, 18, 6], [120, -140, 40, 10], [-200, -145, 50, 12], [30, -150, 35, 8]]) {
+  const s = new THREE.Mesh(new THREE.CircleGeometry(1, 20), sandMat);
+  s.rotation.x = -Math.PI / 2;
+  s.scale.set(w, d, 1);
+  s.position.set(x, 0.12, z);
+  s.renderOrder = 1;
+  scene.add(s);
+}
 
 // The bobber (starts hanging off the rod tip; see Casting below)
 const bobber = new THREE.Group();
@@ -266,29 +349,59 @@ function waitForFish(t) {
 // It hits 1 = the line snaps. (Later, the reel's motor will push back with this.)
 let tension = 0, slackSince = 0;
 
-// Aussie freshwater fish. chance = how often it bites compared to the others,
-// fight = how hard it pulls (1 is tough), points = points per kg.
+// Rarity tiers (from Conor's fish report). chance = how often compared to the others,
+// points = points for an average-sized one.
+const RARITY = {
+  common:    { label: 'Common',    chance: 30,  points: 10,   color: '#c8d0d8' },
+  uncommon:  { label: 'Uncommon',  chance: 15,  points: 25,   color: '#4cd964' },
+  rare:      { label: 'Rare',      chance: 7,   points: 60,   color: '#2a9df4' },
+  epic:      { label: 'Epic',      chance: 3,   points: 150,  color: '#b46cff' },
+  legendary: { label: 'Legendary', chance: 1,   points: 400,  color: '#ff9f1c' },
+  mythic:    { label: 'Mythic',    chance: 0.3, points: 1200, color: '#ff4d6d' },
+};
+// How hard each fight level pulls (1 is tough)
+const FIGHT = { light: 0.4, mediumLight: 0.55, medium: 0.7, mediumHard: 0.85, hard: 1.0, veryHard: 1.15 };
+
+// The Dock at Gympie Terrace. Sizes in cm and fight levels are from Conor's report.
+// The look of each fish (colours, spots, stripes) is based on Australian Museum /
+// Fishes of Australia descriptions. In the "look":
+//   depth/width = body height/thickness compared to its length
+//   back/belly = colours, fins = fin colour
+//   spots, stripes, bars, saddle (dark patch at tail base), blotch (one dark spot), pecSpot (spot at the side fin)
 const FISH_TYPES = [
-  { name: 'Spangled Perch',  min: 0.1, max: 0.5, fight: 0.4,  points: 10, chance: 30, color: 0xc8c090 },
-  { name: 'Silver Perch',    min: 0.3, max: 1.5, fight: 0.5,  points: 12, chance: 28, color: 0xb8c4cc },
-  { name: 'Australian Bass', min: 0.5, max: 2.5, fight: 0.8,  points: 20, chance: 16, color: 0x6f6a3a },
-  { name: 'Golden Perch',    min: 1,   max: 4,   fight: 0.75, points: 15, chance: 15, color: 0xd9a830 },
-  { name: 'Saratoga',        min: 1,   max: 3.5, fight: 0.95, points: 40, chance: 8,  color: 0x9a8a5a },
-  { name: 'Murray Cod',      min: 4,   max: 15,  fight: 1.1,  points: 25, chance: 3,  color: 0x4f6b3a },
+  { name: 'Toadfish', rarity: 'common', min: 10, max: 20, fight: FIGHT.light,
+    look: { shape: 'puffer', depth: 0.42, width: 0.38, back: 0x7a7046, belly: 0xf4f1e6, fins: 0xd9cfa8, spots: 0x2e2a1a } },
+  { name: 'Bream', rarity: 'common', min: 10, max: 40, fight: FIGHT.light,   // yellowfin bream
+    look: { depth: 0.42, width: 0.13, back: 0x7f8f7c, belly: 0xe2e8ea, fins: 0xe8c547, pecSpot: true } },
+  { name: 'Butterfly Bream', rarity: 'uncommon', min: 10, max: 40, fight: FIGHT.light, // threadfin bream
+    look: { depth: 0.32, width: 0.13, back: 0xd9707a, belly: 0xf6dadb, fins: 0xf2d14b, stripes: 0xf2d14b, thread: true } },
+  { name: 'Pony Fish', rarity: 'uncommon', min: 10, max: 40, fight: FIGHT.light,
+    look: { depth: 0.5, width: 0.1, back: 0x9aa3a8, belly: 0xeef2f4, fins: 0xe6d27a, saddle: 0x5a4a35 } },
+  { name: 'Flathead', rarity: 'rare', min: 35, max: 60, fight: FIGHT.medium,   // dusky flathead
+    look: { shape: 'flat', depth: 0.13, width: 0.22, back: 0x7a6248, belly: 0xf2efe6, fins: 0x8a7458, spots: 0x4a3a28, tailSpot: true } },
+  { name: 'Rock Cod', rarity: 'rare', min: 20, max: 55, fight: FIGHT.mediumLight, // estuary cod
+    look: { depth: 0.33, width: 0.17, back: 0x6e5a3e, belly: 0xcdbd9e, fins: 0x6e5a3e, spots: 0xb0662e } },
+  { name: 'Moses Perch', rarity: 'rare', min: 15, max: 35, fight: FIGHT.medium,
+    look: { depth: 0.36, width: 0.14, back: 0xa98c8c, belly: 0xeedcd8, fins: 0xe9b9a0, blotch: true } },
+  { name: 'Grunter', rarity: 'epic', min: 25, max: 45, fight: FIGHT.medium,    // barred javelin
+    look: { depth: 0.3, width: 0.13, back: 0x9c9a68, belly: 0xebe9d8, fins: 0xb8b48a, bars: 0x4a4030 } },
+  { name: 'Stingray', rarity: 'legendary', min: 50, max: 140, fight: FIGHT.mediumHard, // estuary stingray
+    look: { shape: 'ray', back: 0x6b5a40, belly: 0xf0ece0 } },
 ];
 function pickFishType() {
-  let roll = Math.random() * FISH_TYPES.reduce((sum, f) => sum + f.chance, 0);
-  for (const f of FISH_TYPES) { roll -= f.chance; if (roll < 0) return f; }
+  let roll = Math.random() * FISH_TYPES.reduce((sum, f) => sum + RARITY[f.rarity].chance, 0);
+  for (const f of FISH_TYPES) { roll -= RARITY[f.rarity].chance; if (roll < 0) return f; }
   return FISH_TYPES[0];
 }
 
-const fish = { type: null, weight: 0, strength: 0, stamina: 1, dist: 0, angle: 0, surgeUntil: 0, nextSurge: 0, wiggle: 0 };
+const fish = { type: null, cm: 0, rel: 0, strength: 0, stamina: 1, dist: 0, angle: 0, surgeUntil: 0, nextSurge: 0, wiggle: 0 };
 function hookFish(t) {
   const type = pickFishType();
   const rel = Math.random() ** 2;                      // mostly small for its kind, sometimes a big one
   fish.type = type;
-  fish.weight = type.min + (type.max - type.min) * rel;
-  fish.strength = type.fight * (0.75 + 0.35 * rel);    // bigger fish of a kind pull harder
+  fish.rel = rel;
+  fish.cm = type.min + (type.max - type.min) * rel;
+  fish.strength = type.fight * (0.6 + 0.6 * rel);      // a small one fights much less than a big one
   fish.stamina = 1;
   const dx = bobber.position.x - head.position.x, dz = bobber.position.z - head.position.z;
   fish.dist = Math.hypot(dx, dz);
@@ -321,26 +434,111 @@ let catchFish = null;   // the 3D fish currently on show
 const catchNose = new THREE.Object3D(); // where the line attaches (its mouth)
 catchPivot.add(catchNose);
 
-function makeFishModel(type, weight) {
-  const len = 0.4 * Math.cbrt(weight);  // 0.2 m for a tiddler, 1 m for a big cod
-  // a little self-glow so its shady underside still shows its colour
-  const mat = new THREE.MeshLambertMaterial({ color: type.color, emissive: new THREE.Color(type.color).multiplyScalar(0.35) });
+// Paints a fish's colours and markings onto a texture that wraps around its body.
+// The texture wraps round the fish like a label round a can: the left half is one
+// side (tail on the left, nose in the middle), the right half is the other side mirrored.
+// Top of the picture = its back, bottom = its belly.
+function fishSkin(look) {
+  const W = 256, H = 128, c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const g = c.getContext('2d');
+  const hex = n => '#' + n.toString(16).padStart(6, '0');
+  const grad = g.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, hex(look.back)); grad.addColorStop(0.42, hex(look.back));
+  grad.addColorStop(0.62, hex(look.belly)); grad.addColorStop(1, hex(look.belly));
+  g.fillStyle = grad; g.fillRect(0, 0, W, H);
+  // Draw markings on one side (sx: 0 = tail, 1 = nose; sy: 0 = back, 1 = belly), mirrored onto the other
+  const dot = (sx, sy, r, color) => {
+    g.fillStyle = color;
+    for (const x of [sx * W / 2, W - sx * W / 2]) { g.beginPath(); g.ellipse(x, sy * H, r * W / 2, r * H, 0, 0, Math.PI * 2); g.fill(); }
+  };
+  let s = 3; const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
+  if (look.spots) for (let i = 0; i < 40; i++) dot(0.08 + rnd() * 0.8, 0.12 + rnd() * 0.45, 0.02 + rnd() * 0.025, hex(look.spots));
+  if (look.bars) for (let b = 0; b < 9; b++) for (let k = 0; k < 4; k++) dot(0.12 + b * 0.085, 0.15 + k * 0.1, 0.022, hex(look.bars));
+  if (look.stripes) {
+    g.fillStyle = hex(look.stripes);
+    for (const y of [0.4, 0.5, 0.6]) g.fillRect(0, y * H, W, H * 0.045);
+  }
+  if (look.saddle) dot(0.06, 0.32, 0.07, hex(look.saddle));
+  if (look.blotch) dot(0.36, 0.34, 0.06, '#1a1a1a');
+  if (look.pecSpot) dot(0.66, 0.5, 0.025, '#111111');
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+// Builds a 3D fish from its "look". Points nose along +x, back along +y.
+function makeFishModel(type, cm) {
+  const L = type.look, len = cm / 100;
+  if (L.shape === 'ray') return makeRay(L, len);
+  // The skin glows a bit by itself, so its colours show even on the side facing away from the sun
+  const tex = fishSkin(L);
+  const skin = new THREE.MeshLambertMaterial({ map: tex, emissive: 0xffffff, emissiveMap: tex, emissiveIntensity: 0.55 });
+  const finMat = new THREE.MeshLambertMaterial({ color: L.fins, emissive: new THREE.Color(L.fins).multiplyScalar(0.55), side: THREE.DoubleSide });
   const g = new THREE.Group();
-  const bodyMesh = new THREE.Mesh(new THREE.SphereGeometry(0.5, 16, 12), mat);
-  bodyMesh.scale.set(len, len * 0.3, len * 0.14);
-  const tail = new THREE.Mesh(new THREE.ConeGeometry(len * 0.18, len * 0.3, 4), mat);
-  tail.rotation.z = -Math.PI / 2;      // point the cone's tip at the body
-  tail.scale.z = 0.2;                  // flatten it into a fin
-  tail.position.x = -len * 0.6;
-  const eyeMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
+  const bodyMesh = new THREE.Mesh(new THREE.SphereGeometry(0.5, 20, 14), skin);
+  bodyMesh.scale.set(len, len * L.depth, len * L.width);
+  g.add(bodyMesh);
+  // Fins are flat shapes: tail, back fin, belly fin
+  const fin = (pts, x, y) => {
+    const m = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape(pts.map(([a, b]) => new THREE.Vector2(a * len, b * len)))), finMat);
+    m.position.set(x * len, y * len, 0);
+    g.add(m);
+    return m;
+  };
+  const tailH = L.shape === 'puffer' ? 0.12 : L.depth * 0.55;
+  fin([[0, 0], [-0.22, tailH], [-0.16, 0], [-0.22, -tailH]], -0.46, 0);           // forked tail
+  if (L.thread) fin([[-0.2, tailH], [-0.42, tailH * 1.3], [-0.2, tailH * 0.85]], -0.46, 0); // threadfin streamer
+  if (L.shape !== 'puffer') {
+    fin([[-0.3, 0], [-0.22, L.depth * 0.38], [0.2, 0.02], [0.2, 0]], 0, L.depth * 0.45);   // back fin
+    fin([[-0.25, 0], [-0.18, -L.depth * 0.25], [0.02, 0]], 0, -L.depth * 0.44);           // belly fin
+  }
+  if (L.tailSpot) {
+    const spot = new THREE.Mesh(new THREE.CircleGeometry(len * 0.04, 10), new THREE.MeshBasicMaterial({ color: 0x1a1a1a, side: THREE.DoubleSide }));
+    spot.position.set(-0.6 * len, 0, 0.001);
+    g.add(spot);
+  }
+  // Eyes
+  const eyeR = len * (L.shape === 'puffer' ? 0.07 : 0.035);
   for (const side of [-1, 1]) {
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(len * 0.03, 8, 6), eyeMat);
-    eye.position.set(len * 0.33, len * 0.04, side * len * 0.065);
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(eyeR, 10, 8), new THREE.MeshBasicMaterial({ color: 0x111111 }));
+    eye.position.set(len * 0.34, len * L.depth * (L.shape === 'flat' ? 0.45 : 0.12), side * len * L.width * 0.42);
     g.add(eye);
   }
-  g.add(bodyMesh, tail);
   g.rotation.z = Math.PI / 2;          // hang it nose-up, like it's held up by the line
   g.position.y = -len / 2;             // so the nose sits at the top of the pivot
+  return g;
+}
+
+// Stingray: a flat diamond with a long whip tail. Brown on top, pale underneath.
+function makeRay(L, len) {
+  const g = new THREE.Group();
+  const w = len * 0.5;                  // disc half-width
+  const disc = new THREE.Shape();
+  disc.moveTo(0, w * 0.9);                                  // nose
+  disc.quadraticCurveTo(w * 0.7, w * 0.5, w, -w * 0.05);    // wing tip
+  disc.quadraticCurveTo(w * 0.5, -w * 0.7, 0, -w * 0.8);    // back
+  disc.quadraticCurveTo(-w * 0.5, -w * 0.7, -w, -w * 0.05);
+  disc.quadraticCurveTo(-w * 0.7, w * 0.5, 0, w * 0.9);
+  const discGeo = new THREE.ShapeGeometry(disc, 12);
+  const top = new THREE.Mesh(discGeo, new THREE.MeshLambertMaterial({ color: L.back, emissive: 0x222222 }));
+  top.position.z = 0.01;
+  const under = new THREE.Mesh(discGeo, new THREE.MeshLambertMaterial({ color: L.belly, emissive: 0x666666 }));
+  under.rotation.y = Math.PI;
+  under.position.z = -0.01;
+  const hump = new THREE.Mesh(new THREE.SphereGeometry(w * 0.45, 14, 10), top.material);
+  hump.scale.z = 0.2;
+  hump.position.z = w * 0.05;          // bulges out of the top side only
+  const tail = new THREE.Mesh(new THREE.ConeGeometry(w * 0.06, len * 1.1, 6), top.material);
+  tail.rotation.x = Math.PI;            // point down, away from the body
+  tail.position.y = -w * 0.8 - len * 0.55;
+  for (const side of [-1, 1]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(w * 0.05, 8, 6), new THREE.MeshBasicMaterial({ color: 0x111111 }));
+    eye.position.set(side * w * 0.18, w * 0.35, w * 0.08);
+    g.add(eye);
+  }
+  g.add(top, under, hump, tail);
+  g.position.y = -w * 0.9;              // nose at the top of the pivot
   return g;
 }
 
@@ -358,12 +556,12 @@ body.add(catchSign);
 function landFish(t) {
   tension = 0;
   state = 'showing';
-  const type = fish.type, kg = fish.weight;
-  const points = Math.round(kg * type.points);
-  // Update the records
+  const type = fish.type, cm = fish.cm, rarity = RARITY[type.rarity];
+  const points = Math.round(rarity.points * (0.6 + 0.8 * fish.rel)); // bigger = more points
+  // Update the records (best = longest of each kind, in cm)
   const best = records.best[type.name];
-  const note = best === undefined ? 'First catch!' : kg > best ? 'New record!' : '';
-  if (best === undefined || kg > best) records.best[type.name] = kg;
+  const note = best === undefined ? 'First catch!' : cm > best ? 'New record!' : '';
+  if (best === undefined || cm > best) records.best[type.name] = cm;
   records.score += points;
   records.count += 1;
   saveRecords();
@@ -371,7 +569,9 @@ function landFish(t) {
 
   // The fish on the line
   if (catchFish) catchPivot.remove(catchFish);
-  catchFish = makeFishModel(type, kg);
+  catchFish = makeFishModel(type, cm);
+  // Big fish (especially a stingray) hang further away so they fit in view
+  catchPivot.position.z = -1 - cm / (type.look.shape === 'ray' ? 70 : 150);
   catchPivot.add(catchFish);
   catchPivot.visible = true;
   bobber.visible = false;  // it would block your view of the fish
@@ -381,10 +581,11 @@ function landFish(t) {
   cctx.fillStyle = 'rgba(16,32,44,0.9)'; cctx.fillRect(0, 0, 512, 320);
   cctx.strokeStyle = '#2a9df4'; cctx.lineWidth = 8; cctx.strokeRect(4, 4, 504, 312);
   cctx.textAlign = 'center'; cctx.fillStyle = '#fff';
-  cctx.font = 'bold 46px sans-serif'; cctx.fillText(type.name, 256, 70);
-  cctx.font = '40px sans-serif'; cctx.fillText(`${kg.toFixed(2)} kg   +${points} pts`, 256, 135);
-  cctx.fillStyle = '#ffcc00'; cctx.font = 'bold 40px sans-serif'; cctx.fillText(note, 256, 200);
-  cctx.fillStyle = '#9fb8c8'; cctx.font = '28px sans-serif'; cctx.fillText('Tap to keep fishing', 256, 275);
+  cctx.font = 'bold 46px sans-serif'; cctx.fillText(type.name, 256, 62);
+  cctx.fillStyle = rarity.color; cctx.font = 'bold 30px sans-serif'; cctx.fillText(rarity.label.toUpperCase(), 256, 105);
+  cctx.fillStyle = '#fff'; cctx.font = '38px sans-serif'; cctx.fillText(`${Math.round(cm)} cm   +${points} pts`, 256, 160);
+  cctx.fillStyle = '#ffcc00'; cctx.font = 'bold 38px sans-serif'; cctx.fillText(note, 256, 215);
+  cctx.fillStyle = '#9fb8c8'; cctx.font = '28px sans-serif'; cctx.fillText('Tap to keep fishing', 256, 280);
   catchTex.needsUpdate = true;
   catchSign.visible = true;
 }
@@ -629,29 +830,242 @@ function spawnBigFish(t) {
   spawnSwimmer(group, mat, t, 0.7, 25);
 }
 
-// Ducks paddling slow circles out on the lake
-const duckBodyMat = new THREE.MeshLambertMaterial({ color: 0x8a6a4a });
-const duckHeadMat = new THREE.MeshLambertMaterial({ color: 0x1e5b2e });
-const duckBeakMat = new THREE.MeshLambertMaterial({ color: 0xf0a020 });
-const ducks = [];
-for (let i = 0; i < 7; i++) {
-  const d = new THREE.Group();
-  const b = new THREE.Mesh(new THREE.SphereGeometry(0.3, 12, 8), duckBodyMat);
-  b.scale.set(1.4, 0.7, 0.9); b.position.y = 0.12;
-  const h = new THREE.Mesh(new THREE.SphereGeometry(0.14, 10, 8), duckHeadMat);
-  h.position.set(0.32, 0.42, 0);
-  const k = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.16, 6), duckBeakMat);
-  k.rotation.z = -Math.PI / 2; k.position.set(0.5, 0.4, 0);
-  d.add(b, h, k);
-  d.scale.setScalar(1.5);
-  // Somewhere 25-42 m out in front (the shore starts around 45 m), not on the island
-  let hx, hz;
-  do {
-    const a = (rand() - 0.5) * 2.6, r = 25 + rand() * 17;
-    hx = -Math.sin(a) * r; hz = -Math.cos(a) * r;
-  } while (Math.hypot(hx + 18, hz + 35) < 11);
-  scene.add(d);
-  ducks.push({ d, hx, hz, phase: rand() * 6, spin: (rand() < 0.5 ? -1 : 1) * (0.05 + rand() * 0.06), r: 1 + rand() * 2 });
+// ---------- Boats ----------
+// All boats are built pointing along +x, sitting with their bottom at y = 0.
+function hull(len, beam, h, color, parent) {
+  const s = new THREE.Shape();           // outline seen from above: square stern, pointed bow
+  s.moveTo(-len / 2, -beam / 2);
+  s.lineTo(len * 0.2, -beam / 2);
+  s.quadraticCurveTo(len * 0.45, -beam * 0.35, len / 2, 0);
+  s.quadraticCurveTo(len * 0.45, beam * 0.35, len * 0.2, beam / 2);
+  s.lineTo(-len / 2, beam / 2);
+  s.closePath();
+  const geo = new THREE.ExtrudeGeometry(s, { depth: h, bevelEnabled: false });
+  geo.rotateX(-Math.PI / 2);             // extrude upward instead of sideways
+  return put(geo, color, 0, 0, 0, parent);
+}
+const SHIRTS = [0xe85d4a, 0x2a9df4, 0xf2b134, 0xffffff, 0x3a8f5a, 0x7a4fd0];
+function person(parent, x, y, z) {
+  put(new THREE.CylinderGeometry(0.18, 0.2, 0.6, 6), SHIRTS[Math.floor(rand() * SHIRTS.length)], x, y + 0.3, z, parent);
+  put(new THREE.SphereGeometry(0.13, 8, 6), 0xe0b48c, x, y + 0.75, z, parent);
+}
+function makeYacht() {
+  const g = new THREE.Group();
+  hull(9, 3, 1.1, 0xf4f4f0, g);
+  put(new THREE.BoxGeometry(3.2, 0.7, 1.9), 0xf4f4f0, -0.6, 1.45, 0, g);          // cabin
+  put(new THREE.BoxGeometry(3.25, 0.25, 1.95), 0x22313a, -0.6, 1.5, 0, g);        // cabin windows
+  put(new THREE.CylinderGeometry(0.06, 0.08, 11, 6), 0xdddddd, 0.8, 6.6, 0, g);   // mast
+  const boom = put(new THREE.CylinderGeometry(0.17, 0.17, 3.6, 6), 0x1f4e79, -1, 2.3, 0, g); // sail packed on the boom
+  boom.rotation.z = Math.PI / 2;
+  return g;
+}
+function makeCruiser() {
+  const g = new THREE.Group();
+  hull(10, 3.4, 1.4, 0xf4f4f0, g);
+  put(new THREE.BoxGeometry(4.5, 1.3, 2.8), 0xf4f4f0, -0.5, 2, 0, g);
+  put(new THREE.BoxGeometry(4.55, 0.5, 2.85), 0x22313a, -0.5, 2.2, 0, g);
+  put(new THREE.BoxGeometry(2.4, 0.15, 2.6), 0x1f4e79, -1, 3.3, 0, g);          // flybridge roof
+  return g;
+}
+function makeTinny() {
+  const g = new THREE.Group();
+  hull(4, 1.6, 0.55, 0xb9c0c4, g);
+  put(new THREE.BoxGeometry(0.35, 0.8, 0.35), 0x222222, -2.1, 0.55, 0, g);       // outboard motor
+  person(g, -1.3, 0.3, 0);
+  return g;
+}
+function makePontoon() {                 // the hire "party pontoons" on the river
+  const g = new THREE.Group();
+  for (const z of [-1, 1]) {
+    const tube = put(new THREE.CylinderGeometry(0.3, 0.3, 6, 10), 0xd8dcde, 0, 0.3, z, g);
+    tube.rotation.z = Math.PI / 2;
+  }
+  put(new THREE.BoxGeometry(6, 0.15, 2.6), 0xe8e2d4, 0, 0.65, 0, g);              // deck
+  const roof = rand() < 0.5 ? 0x2a9df4 : 0xf4f4f0;
+  put(new THREE.BoxGeometry(4.6, 0.08, 2.7), roof, -0.3, 2.6, 0, g);             // canopy
+  for (const x of [-2.4, 1.8]) for (const z of [-1.2, 1.2]) put(new THREE.CylinderGeometry(0.04, 0.04, 1.9, 4), 0xcccccc, x, 1.65, z, g);
+  put(new THREE.BoxGeometry(0.35, 0.8, 0.35), 0x222222, -3.1, 0.6, 0, g);
+  for (let i = 0; i < 3; i++) person(g, -1.5 + i * 1.2, 0.7, (rand() - 0.5) * 1.4);
+  return g;
+}
+function makeFerry() {                   // Noosa ferry: white with blue trim (check the real colours!)
+  const g = new THREE.Group();
+  hull(16, 4.2, 1.4, 0xf4f4f0, g);
+  put(new THREE.BoxGeometry(13, 0.35, 4.25), 0x1f5fa8, -1.2, 1.1, 0, g);          // blue stripe
+  put(new THREE.BoxGeometry(10, 2, 3.8), 0xf4f4f0, -1.5, 2.4, 0, g);              // cabin
+  put(new THREE.BoxGeometry(10.05, 0.9, 3.85), 0x22313a, -1.5, 2.6, 0, g);        // windows
+  put(new THREE.BoxGeometry(11, 0.15, 4.1), 0x1f5fa8, -1.5, 3.5, 0, g);           // roof
+  for (let i = 0; i < 6; i++) person(g, -5 + i * 1.6, 3.6, (rand() - 0.5) * 2.5); // people up top
+  return g;
+}
+
+// Wake: a pale V of churned water trailing behind a moving boat
+const wakeMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35, depthWrite: false,
+  polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4, side: THREE.DoubleSide });
+function addWake(g, len, beam) {
+  const shape = new THREE.Shape([new THREE.Vector2(0, -beam / 2), new THREE.Vector2(-len * 2.5, -beam * 2.2),
+    new THREE.Vector2(-len * 2.5, -beam * 1.6), new THREE.Vector2(0, 0), new THREE.Vector2(-len * 2.5, beam * 1.6),
+    new THREE.Vector2(-len * 2.5, beam * 2.2), new THREE.Vector2(0, beam / 2)]);
+  const geo = new THREE.ShapeGeometry(shape);
+  geo.rotateX(-Math.PI / 2);
+  const w = new THREE.Mesh(geo, wakeMat);
+  w.position.x = -len / 2;
+  w.renderOrder = 1;
+  g.add(w);
+  return w;
+}
+
+// Boats moored out in the river (they swing gently on their moorings)
+const moored = [];
+for (let i = 0; i < 16; i++) {
+  let x, z;
+  // Two bands of moorings, with clear lanes for moving boats in between
+  x = -260 + rand() * 520; z = rand() < 0.5 ? -50 - rand() * 22 : -105 - rand() * 30;
+  const g = rand() < 0.6 ? makeYacht() : makeCruiser();
+  scene.add(g);
+  moored.push({ g, x, z, heading: 0.3 + (rand() - 0.5) * 0.4, phase: rand() * 6, sink: 0.35 });
+}
+// Tinnies and pontoons tied up at the other jetties
+for (const jx of SIDE_JETTIES) for (const z of [0, 5]) {
+  const g = rand() < 0.5 ? makeTinny() : makePontoon();
+  scene.add(g);
+  moored.push({ g, x: jx + 3, z, heading: Math.PI / 2, phase: rand() * 6, sink: 0.25, tied: true });
+}
+
+// Boats going up and down the river
+const traffic = [];
+function spawnBoat(kind) {
+  const g = kind === 'ferry' ? makeFerry() : kind === 'tinny' ? makeTinny() : makePontoon();
+  const dir = Math.random() < 0.5 ? 1 : -1;
+  const z = kind === 'ferry' ? -88 : Math.random() < 0.5 ? -38 - Math.random() * 6 : -80 - Math.random() * 15;
+  const size = kind === 'ferry' ? [16, 4.2] : kind === 'tinny' ? [4, 1.6] : [6, 2.6];
+  g.position.set(-dir * 330, 0, z);
+  g.rotation.y = dir > 0 ? 0 : Math.PI;
+  const wake = addWake(g, size[0], size[1]);
+  scene.add(g);
+  traffic.push({ g, dir, wake, speed: kind === 'ferry' ? 4.5 : kind === 'tinny' ? 7 : 3, sink: kind === 'tinny' ? 0.25 : 0.35 });
+}
+
+// ---------- Pelicans ----------
+function makePelican(flying) {
+  const g = new THREE.Group(), WHITE = 0xf2f2ee, BLACK = 0x1d1d1d;
+  const bodyM = put(new THREE.SphereGeometry(0.5, 10, 8), WHITE, 0, 0.25, 0, g);
+  bodyM.scale.set(0.9, 0.5, 0.45);
+  const neck = put(new THREE.CylinderGeometry(0.06, 0.08, 0.45, 6), WHITE, 0.33, 0.55, 0, g);
+  neck.rotation.z = -0.25;
+  put(new THREE.SphereGeometry(0.1, 8, 6), WHITE, 0.38, 0.8, 0, g);                 // head
+  const bill = put(new THREE.ConeGeometry(0.05, 0.5, 6), 0xf0c9a0, 0.65, 0.74, 0, g); // long pale bill
+  bill.rotation.z = -Math.PI / 2 - 0.25;
+  const pouch = put(new THREE.SphereGeometry(0.1, 8, 6), 0xf3b9a0, 0.58, 0.66, 0, g);
+  pouch.scale.set(2.2, 0.6, 0.7);
+  const wings = [];
+  if (flying) {
+    // Spread wings: white near the body, black flight feathers at the ends
+    for (const side of [-1, 1]) {
+      const pivot = new THREE.Group();
+      pivot.position.set(0, 0.3, side * 0.2);
+      put(new THREE.BoxGeometry(0.45, 0.03, 0.7), WHITE, 0, 0, side * 0.35, pivot);
+      put(new THREE.BoxGeometry(0.38, 0.03, 0.6), BLACK, -0.04, 0, side * 0.98, pivot);
+      g.add(pivot);
+      wings.push({ pivot, side });
+    }
+  } else {
+    // Folded wings: black at the back
+    for (const side of [-1, 1]) {
+      const w = put(new THREE.SphereGeometry(0.5, 8, 6), BLACK, -0.22, 0.38, side * 0.16, g);
+      w.scale.set(0.55, 0.2, 0.2);
+    }
+  }
+  g.scale.setScalar(1.6);               // a real Australian pelican is about 1.6 m long
+  return { g, wings };
+}
+const pelicans = [];
+for (let i = 0; i < 5; i++) {           // floating around near the jetty
+  const p = makePelican(false);
+  scene.add(p.g);
+  pelicans.push({ g: p.g, hx: -35 + rand() * 70, hz: -12 - rand() * 35, phase: rand() * 6, spin: (rand() < 0.5 ? -1 : 1) * (0.04 + rand() * 0.05), r: 1 + rand() * 3 });
+}
+// One sitting on a lone marker post out in the water
+put(new THREE.CylinderGeometry(0.15, 0.15, 3.2, 8), 0x6e5236, -7, 0, -10);
+const percher = makePelican(false);
+percher.g.position.set(-7, 1.6, -10);
+percher.g.rotation.y = 2.2;             // looking out over the river
+scene.add(percher.g);
+const flyers = [];
+function spawnFlyer() {
+  const p = makePelican(true);
+  const dir = Math.random() < 0.5 ? 1 : -1;
+  p.g.position.set(-dir * 200, 18 + Math.random() * 14, -20 - Math.random() * 60);
+  p.g.rotation.y = dir > 0 ? 0 : Math.PI;
+  scene.add(p.g);
+  flyers.push({ ...p, dir, phase: Math.random() * 6 });
+}
+
+// ---------- Merge the scenery ----------
+// The phone has to draw everything twice (once per eye), and drawing hundreds of
+// separate objects is slow. Everything that never moves gets glued into one mesh
+// per colour, so it's ~25 draws instead of ~1000.
+function mergeScenery() {
+  scenery.updateMatrixWorld(true);
+  const buckets = new Map();             // material -> list of geometries
+  scenery.traverse(o => {
+    if (!o.isMesh) return;
+    const geo = o.geometry.index ? o.geometry.toNonIndexed() : o.geometry.clone();
+    geo.applyMatrix4(o.matrixWorld);
+    if (!buckets.has(o.material)) buckets.set(o.material, []);
+    buckets.get(o.material).push(geo);
+  });
+  for (const [material, geos] of buckets) {
+    const count = geos.reduce((n, g) => n + g.attributes.position.count, 0);
+    const pos = new Float32Array(count * 3), nrm = new Float32Array(count * 3);
+    let off = 0;
+    for (const g of geos) {
+      pos.set(g.attributes.position.array, off);
+      nrm.set(g.attributes.normal.array, off);
+      off += g.attributes.position.array.length;
+      g.dispose();
+    }
+    const merged = new THREE.BufferGeometry();
+    merged.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    merged.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+    scene.add(new THREE.Mesh(merged, material));
+  }
+}
+mergeScenery();
+
+let nextBoat = 4, nextFerry = 25, nextFlyer = 12;
+function updateLife(t, dt) {
+  if (t > nextBoat) { spawnBoat(Math.random() < 0.6 ? 'tinny' : 'pontoon'); nextBoat = t + 15 + Math.random() * 20; }
+  if (t > nextFerry) { spawnBoat('ferry'); nextFerry = t + 70 + Math.random() * 40; }
+  if (t > nextFlyer) { spawnFlyer(); nextFlyer = t + 30 + Math.random() * 40; }
+
+  for (const m of moored) {
+    const swing = m.tied ? 0 : Math.sin(t * 0.08 + m.phase) * 0.25;
+    m.g.position.set(m.x, waveY(m.x, m.z, t) - m.sink, m.z);
+    m.g.rotation.set(Math.sin(t * 0.9 + m.phase) * 0.02, m.heading + swing, Math.sin(t * 0.7 + m.phase) * 0.03);
+  }
+  for (let i = traffic.length - 1; i >= 0; i--) {
+    const b = traffic[i], g = b.g;
+    g.position.x += b.dir * b.speed * dt;
+    g.position.y = waveY(g.position.x, g.position.z, t) - b.sink;
+    g.rotation.z = 0.04;                 // bow lifts a little when moving
+    b.wake.position.y = b.sink + 0.05;   // keep the wake on the water surface
+    if (Math.abs(g.position.x) > 340) { scene.remove(g); traffic.splice(i, 1); }
+  }
+  for (const k of pelicans) {
+    const p = k.phase + t * k.spin;
+    k.g.position.set(k.hx + Math.cos(p) * k.r, 0, k.hz - Math.sin(p) * k.r);
+    k.g.position.y = waveY(k.g.position.x, k.g.position.z, t) - 0.15;
+    k.g.rotation.y = p + Math.sign(k.spin) * Math.PI / 2; // face the way it's paddling
+  }
+  for (let i = flyers.length - 1; i >= 0; i--) {
+    const f = flyers[i];
+    f.g.position.x += f.dir * 9 * dt;
+    // Pelicans flap a few times, then glide
+    const flap = Math.sin(t * 9 + f.phase) * 0.4 * Math.max(0, Math.sin(t * 0.8 + f.phase));
+    for (const w of f.wings) w.pivot.rotation.x = -w.side * flap;
+    if (Math.abs(f.g.position.x) > 220) { scene.remove(f.g); flyers.splice(i, 1); }
+  }
 }
 
 let nextSchool = 3, nextBig = 10, lastWildT = 0;
@@ -675,12 +1089,7 @@ function updateWildlife(t) {
     if (age > s.life) { scene.remove(o); s.mat.dispose(); swimmers.splice(i, 1); }
   }
 
-  for (const k of ducks) {
-    const p = k.phase + t * k.spin;
-    k.d.position.set(k.hx + Math.cos(p) * k.r, 0, k.hz - Math.sin(p) * k.r);
-    k.d.position.y = waveY(k.d.position.x, k.d.position.z, t);
-    k.d.rotation.y = p + Math.sign(k.spin) * Math.PI / 2; // face the way it's paddling
-  }
+  updateLife(t, dt);
 }
 
 // ---------- Catch log ----------
@@ -688,16 +1097,16 @@ function updateWildlife(t) {
 // HTML text wouldn't work in VR (it wouldn't be in 3D), so we draw onto a texture.
 // Records are saved on the phone, so they're still there next time you play.
 const boardCanvas = document.createElement('canvas');
-boardCanvas.width = 512; boardCanvas.height = 384;
+boardCanvas.width = 512; boardCanvas.height = 512;
 const bctx = boardCanvas.getContext('2d');
 const boardTex = new THREE.CanvasTexture(boardCanvas);
 boardTex.colorSpace = THREE.SRGBColorSpace;
-const board = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 1.2), new THREE.MeshBasicMaterial({ map: boardTex }));
+const board = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 1.4), new THREE.MeshBasicMaterial({ map: boardTex }));
 board.position.set(-1.6, 1.6, -2.2);
 board.rotation.y = 0.5;
 scene.add(board);
 
-const SAVE_KEY = 'vr-fishing-records';
+const SAVE_KEY = 'vr-fishing-noosa-dock'; // separate from the lake's records
 let records = { score: 0, count: 0, best: {} };
 try { records = JSON.parse(localStorage.getItem(SAVE_KEY)) || records; } catch {}
 function saveRecords() {
@@ -705,23 +1114,26 @@ function saveRecords() {
 }
 
 function drawLog() {
-  bctx.fillStyle = '#10202c'; bctx.fillRect(0, 0, 512, 384);
-  bctx.strokeStyle = '#2a9df4'; bctx.lineWidth = 8; bctx.strokeRect(4, 4, 504, 376);
+  bctx.fillStyle = '#10202c'; bctx.fillRect(0, 0, 512, 512);
+  bctx.strokeStyle = '#2a9df4'; bctx.lineWidth = 8; bctx.strokeRect(4, 4, 504, 504);
   bctx.textAlign = 'left'; bctx.fillStyle = '#fff'; bctx.font = 'bold 32px sans-serif';
-  bctx.fillText('Catch log', 24, 50);
+  bctx.fillText('Catch log: The Dock', 24, 50);
   bctx.font = '26px sans-serif'; bctx.fillStyle = '#ffcc00';
-  bctx.fillText(`Score ${records.score}    Fish ${records.count}`, 24, 92);
+  bctx.fillText(`Score ${records.score}    Fish ${records.count}`, 24, 90);
   bctx.font = '24px sans-serif';
   FISH_TYPES.forEach((f, i) => {
-    const kg = records.best[f.name];
-    bctx.fillStyle = kg === undefined ? '#5d7383' : '#fff';
-    bctx.fillText(kg === undefined ? '???' : f.name, 24, 145 + i * 38);
+    const cm = records.best[f.name], y = 138 + i * 38;
+    // Rarity dot shows even for fish you haven't caught, so you know what's out there
+    bctx.fillStyle = RARITY[f.rarity].color;
+    bctx.beginPath(); bctx.arc(32, y - 8, 7, 0, Math.PI * 2); bctx.fill();
+    bctx.fillStyle = cm === undefined ? '#5d7383' : '#fff';
+    bctx.fillText(cm === undefined ? '???' : f.name, 48, y);
     bctx.textAlign = 'right';
-    bctx.fillText(kg === undefined ? '' : kg.toFixed(2) + ' kg', 488, 145 + i * 38);
+    bctx.fillText(cm === undefined ? '' : Math.round(cm) + ' cm', 488, y);
     bctx.textAlign = 'left';
   });
   bctx.fillStyle = '#5d7383'; bctx.font = '18px sans-serif';
-  bctx.fillText(padStatus, 24, 368);
+  bctx.fillText(padStatus, 24, 490);
   boardTex.needsUpdate = true;
 }
 drawLog();

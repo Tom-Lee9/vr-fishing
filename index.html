@@ -30,7 +30,7 @@
   <p id="msg"></p>
   <p>Hold the screen (or headset button) to charge a cast, let go to throw it where you're looking. When the bobber gets pulled under, tap fast to hook the fish. Then hold to reel in. When the fish makes a run (RUN!), stop winding and let it take line, or the line snaps. The white mark on the bar is your drag; the number shows how much line is left. Hold with no fish on to wind back in. After a catch, look at Keep or Release and tap. Look at the Aquarium button under your catch log to visit your fish. Your catch log is on your left. Two-finger tap re-centres.</p>
   <p>Joy-Cons: hold ZR or R to cast, press it to hook, spin the right stick in circles to reel, + re-centres.</p>
-  <p>Buy a boat in the Aquarium's Shop, then look at "Take the boat" under the catch log. Push a stick to drive. Look down-left at the dashboard to get back on the jetty.</p>
+  <p>Buy a boat in the Aquarium's Shop, then press Y (or look at "Get in the boat" under the catch log). Push a stick to drive. Look down-left at the dashboard to get back on the jetty.</p>
 </div>
 <div id="divider"></div>
 
@@ -417,9 +417,13 @@ const FISH_TYPES = [
   { name: 'Stingray', rarity: 'legendary', min: 50, max: 140, fight: FIGHT.mediumHard, // estuary stingray
     look: { shape: 'ray', back: 0x6b5a40, belly: 0xf0ece0 } },
 ];
+// The further you are from the jetty, the more the rare fish bite (far = 0 at the jetty, 1 from 200 m out)
+const FAR_BOOST = { common: -0.5, uncommon: 0.5, rare: 1.5, epic: 3, legendary: 5, mythic: 8 };
 function pickFishType() {
-  let roll = Math.random() * FISH_TYPES.reduce((sum, f) => sum + RARITY[f.rarity].chance, 0);
-  for (const f of FISH_TYPES) { roll -= RARITY[f.rarity].chance; if (roll < 0) return f; }
+  const far = Math.min(1, Math.hypot(head.position.x, head.position.z) / 200);
+  const chance = f => RARITY[f.rarity].chance * (1 + far * FAR_BOOST[f.rarity]);
+  let roll = Math.random() * FISH_TYPES.reduce((sum, f) => sum + chance(f), 0);
+  for (const f of FISH_TYPES) { roll -= chance(f); if (roll < 0) return f; }
   return FISH_TYPES[0];
 }
 
@@ -691,7 +695,7 @@ addEventListener('keyup', e => { if (e.code === 'Space') release(clock.getElapse
 // spin the right stick in circles = wind the reel, + = re-centre.
 // (Standard button numbers: 5 = R, 7 = ZR, 9 = +. Button 0 kept for other pads.)
 const CAST_BUTTONS = [5, 7, 0];
-let padWasDown = false, plusWasDown = false;
+let padWasDown = false, plusWasDown = false, yWasDown = false;
 let stickX = 0, stickY = 0;               // the most pushed-over stick (for driving the boat)
 let crankAngle = {}, crankSpeed = 0;   // last angle of each stick; crankSpeed = turns per second (smoothed)
 let lastPadT = 0, padStatus = '';
@@ -704,6 +708,9 @@ function pollPad(now) {
   if (down && !padWasDown) press(now, true);
   if (!down && padWasDown) release(now);
   padWasDown = down;
+  const yBtn = isDown(2);
+  if (yBtn && !yWasDown) boatButton();
+  yWasDown = yBtn;
   const plus = isDown(9);
   if (plus && !plusWasDown) recentre();
   plusWasDown = plus;
@@ -1506,8 +1513,7 @@ function selectFish(f) {
   setButton(sellBtn, `Sell  $${sellPrice(f.rec)}`, '#3a9d4f', true);
   setButton(feedBtn, records.food > 0 ? `Feed (${records.food} food left)` : 'No food left', '#1f6fb2', records.food > 0);
   infoPanel.visible = true;
-  for (const o of tankFish) o.hit.userData.enabled = false;  // pointer only on the panel now
-  drawMoney('Back to see all your fish');
+  drawMoney('Tap another fish, or Back');
 }
 function deselectFish() {
   selected = null;
@@ -1659,8 +1665,8 @@ function makePlaneSilhouette() {                 // locked: a black shape with a
 }
 const FUEL_TANK = 25, FUEL_PRICE = 2.5;          // litres, $ per litre
 const VEHICLES = [
-  { id: 'rowboat', name: 'Rowboat', price: 100, kmL: 0, kph: 25, carry: 100, make: makeRowboat },
-  { id: 'tinny', name: 'Tinny', price: 500, kmL: 4, kph: 50, carry: 200, make: makeYellowTinny },
+  { id: 'rowboat', name: 'Rowboat', price: 100, kmL: 0, kph: 10, carry: 50, make: makeRowboat },
+  { id: 'tinny', name: 'Tinny', price: 500, kmL: 4, kph: 25, carry: 200, make: makeYellowTinny },
   { id: 'seaplane', name: '???', locked: true, make: makePlaneSilhouette },
 ];
 records.boats = records.boats || [];             // ids of vehicles you own
@@ -1971,11 +1977,13 @@ function updateShop(t) {
 
 // ---------- Your boat ----------
 // "Take the boat" under the catch log. Push a stick to drive (forward/back = go, left/right = steer).
-// The boat turns under you; you can still look anywhere. Fish you keep go in the boat
-// until you get back on the jetty, then they go into the tank.
-let onBoat = false, boatModel = null, boatHeading = Math.PI / 2, boatSpeed = 0;
-const boatPos = new THREE.Vector2();             // x and z on the river
-const boatBtn = makeButton('Take the boat', 0.6, 0.16, '#3a9d4f', () => boardBoat());
+// Your view turns with the boat, so forward is always the front. Y gets in and out.
+// Fish you keep go in the boat until you get back on the jetty, then they go into the tank.
+const MOOR = new THREE.Vector2(2.8, -0.5);       // where it's tied up: on your right, off the end of the jetty
+let onBoat = false, boatModel = null, boatModelId = null, boatHeading = Math.PI / 2, boatSpeed = 0;
+let viewYaw = 0;                                 // extra turn added to your view (the boat's heading)
+const boatPos = MOOR.clone();                    // x and z on the river
+const boatBtn = makeButton('Get in the boat (Y)', 0.6, 0.16, '#3a9d4f', () => boardBoat());
 boatBtn.position.set(0, -0.82, 0.01);
 board.add(boatBtn);
 // Dashboard down to your left: speed, fuel, fish on board, and the way back onto the jetty
@@ -1991,13 +1999,9 @@ dockBtn.position.set(0, -0.17, 0.001);
 dash.add(dockBtn);
 for (const m of [dashInfo.mesh, dockBtn]) { m.material.depthTest = false; m.renderOrder = 12; }
 
-const nearJetty = () => Math.hypot(boatPos.x, boatPos.y + 4) < 12;
+const nearJetty = () => boatPos.distanceTo(MOOR) < 12;
 function boardBoat() {
   if (state !== 'ready') { say('Reel in first', 1.5); return; }
-  boatModel = vehicle().make();
-  scene.add(boatModel);
-  boatPos.set(3, -5);
-  boatHeading = Math.PI / 2;                     // pointing out into the river
   boatSpeed = 0;
   onBoat = true;
   dash.visible = true;
@@ -2011,7 +2015,9 @@ function leaveBoat() {
   }
   onBoat = false;
   dash.visible = false;
-  scene.remove(boatModel);
+  boatPos.copy(MOOR);                            // tie it back up
+  boatHeading = Math.PI / 2;
+  boatSpeed = 0;
   head.position.set(0, EYE_HEIGHT, 0);
   // Unload the fish into the tank (as many as fit)
   let moved = 0;
@@ -2035,7 +2041,7 @@ function drawDash(v) {
   g.fillStyle = holdKg() > v.carry * 0.9 ? '#ff6b5e' : '#fff';
   g.fillText(`Fish ${holdKg().toFixed(1)} / ${v.carry} kg`, 18, 150);
   p.tex.needsUpdate = true;
-  const label = nearJetty() ? 'Back on the jetty' : v.kmL && records.fuel <= 0 ? 'Out of fuel: get towed' : 'Drive back to the jetty';
+  const label = nearJetty() ? 'Back on the jetty (Y)' : v.kmL && records.fuel <= 0 ? 'Out of fuel: get towed' : 'Drive back to the jetty';
   if (dockBtn.userData.label !== label) {
     dockBtn.userData.label = label;
     setButton(dockBtn, label, '#1f6fb2', label !== 'Drive back to the jetty');
@@ -2043,16 +2049,30 @@ function drawDash(v) {
   saveRecords();                                 // keeps your fuel level
 }
 let lastBoatT = 0, lastDash = 0;
+// Y button: hop in, or (near the jetty) hop out
+function boatButton() {
+  if (activeScene !== scene) return;
+  if (onBoat) { if (nearJetty()) leaveBoat(); else say('Drive back to the jetty first', 2); }
+  else if (records.boat) boardBoat();
+}
 function updateBoat(t) {
   const dt = Math.min(0.1, t - lastBoatT);
   lastBoatT = t;
   boatBtn.visible = !!records.boat && !onBoat;
-  if (boatBtn.visible && boatBtn.userData.label !== records.boat) {
-    boatBtn.userData.label = records.boat;
-    setButton(boatBtn, `Take the ${vehicle().name}`, '#3a9d4f', true);
+  viewYaw = onBoat ? boatHeading - Math.PI / 2 : 0;
+  if (!records.boat) return;
+  if (boatModelId !== records.boat) {            // first time, or you swapped boats in the shop
+    if (boatModel) scene.remove(boatModel);
+    boatModel = vehicle().make();
+    scene.add(boatModel);
+    boatModelId = records.boat;
   }
-  if (!onBoat) return;
   const v = vehicle(), top = v.kph / 3.6;        // km/h to metres per second
+  if (!onBoat) {                                 // tied up, bobbing
+    boatModel.position.set(MOOR.x, waveY(MOOR.x, MOOR.y, t) * 0.5 - 0.25, MOOR.y);
+    boatModel.rotation.set(Math.sin(t * 0.9) * 0.02, Math.PI / 2, Math.sin(t * 0.7) * 0.03);
+    return;
+  }
   // Only drive while the line's in, and not with an empty fuel tank
   const canDrive = state === 'ready' && !(v.kmL && records.fuel <= 0);
   const pushed = Math.hypot(stickX, stickY) > 0.25 && canDrive;
@@ -2062,7 +2082,8 @@ function updateBoat(t) {
   const dx = Math.cos(boatHeading) * boatSpeed * dt, dz = -Math.sin(boatHeading) * boatSpeed * dt;
   // Stay on the river: not past the islands, not onto the bank or the jetties
   boatPos.x = Math.max(-290, Math.min(290, boatPos.x + dx));
-  boatPos.y = Math.max(-150, Math.min(-4, boatPos.y + dz));
+  boatPos.y = Math.max(-150, Math.min(0, boatPos.y + dz));
+  if (Math.abs(boatPos.x) < 2.2 && boatPos.y > -3) boatPos.x = boatPos.x < 0 ? -2.2 : 2.2; // not through the jetty
   if (v.kmL) records.fuel = Math.max(0, records.fuel - Math.hypot(dx, dz) / 1000 / v.kmL);
   boatModel.position.set(boatPos.x, waveY(boatPos.x, boatPos.y, t) * 0.5 - 0.25, boatPos.y);
   boatModel.rotation.set(Math.sin(t * 0.9) * 0.02, boatHeading, Math.sin(t * 0.7) * 0.03 + Math.min(0.08, Math.abs(boatSpeed) * 0.01));
@@ -2095,7 +2116,7 @@ function updateHeadFromGyro() {
   qFinal.setFromEuler(euler);
   qFinal.multiply(qMinus90X);                                   // phone looks out the back, not the top
   qFinal.multiply(qScreen.setFromAxisAngle(zAxis, -d(screenAngle()))); // landscape fix
-  qYaw.setFromAxisAngle(yAxis, -yawOffset);
+  qYaw.setFromAxisAngle(yAxis, viewYaw - yawOffset);
   head.quaternion.copy(qYaw).multiply(qFinal);
   return true;
 }
@@ -2161,7 +2182,7 @@ function frame() {
   }
   waterGeo.attributes.position.needsUpdate = true;
 
-  if (!updateHeadFromGyro()) head.rotation.set(mousePitch, mouseYaw, 0, 'YXZ');
+  if (!updateHeadFromGyro()) head.rotation.set(mousePitch, mouseYaw + viewYaw, 0, 'YXZ');
   head.updateMatrixWorld();
   pollPad(t);
   updateBoat(t);

@@ -28,7 +28,7 @@
   <p>Turn your phone sideways. Tap Start, allow motion access, then slide it into the headset.</p>
   <button id="go" disabled>Loading…</button>
   <p id="msg"></p>
-  <p>Hold the screen (or headset button) to charge a cast, let go to throw it where you're looking. When the bobber gets pulled under, tap fast to hook the fish. Then hold to reel in, and let go when the bar goes red or the line snaps. Hold with no fish on to wind back in. Tap to close the catch screen. Your catch log is on your left. Two-finger tap re-centres.</p>
+  <p>Hold the screen (or headset button) to charge a cast, let go to throw it where you're looking. When the bobber gets pulled under, tap fast to hook the fish. Then hold to reel in. When the fish makes a run (RUN!), stop winding and let it take line, or the line snaps. The white mark on the bar is your drag; the number shows how much line is left. Hold with no fish on to wind back in. After a catch, look at Keep or Release and tap. Look at the Aquarium button under your catch log to visit your fish. Your catch log is on your left. Two-finger tap re-centres.</p>
   <p>Joy-Cons: hold ZR or R to cast, press it to hook, spin the right stick in circles to reel, + re-centres.</p>
 </div>
 <div id="divider"></div>
@@ -278,7 +278,35 @@ meter.add(meterBg, meterFill);
 meter.renderOrder = meterBg.renderOrder = meterFill.renderOrder = 10;
 meter.visible = false;
 head.add(meter);
+// In a fight: a white mark where the drag starts slipping, and how much line is left
+const dragMark = new THREE.Mesh(new THREE.PlaneGeometry(0.008, 0.09), new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false, transparent: true }));
+dragMark.renderOrder = 11;
+meter.add(dragMark);
+const lineCanvas = document.createElement('canvas');
+lineCanvas.width = 192; lineCanvas.height = 64;
+const lineTex = new THREE.CanvasTexture(lineCanvas);
+lineTex.colorSpace = THREE.SRGBColorSpace;
+const lineLabel = new THREE.Mesh(new THREE.PlaneGeometry(0.18, 0.06), new THREE.MeshBasicMaterial({ map: lineTex, depthTest: false, transparent: true }));
+lineLabel.position.x = 0.42;
+lineLabel.renderOrder = 11;
+meter.add(lineLabel);
+let lastLineText = '';
+function setLineLeft(m) {
+  const text = Math.max(0, Math.round(m)) + ' m';
+  if (text === lastLineText) return;
+  lastLineText = text;
+  const g = lineCanvas.getContext('2d');
+  g.clearRect(0, 0, 192, 64);
+  g.fillStyle = 'rgba(16,32,44,0.85)'; g.fillRect(0, 0, 192, 64);
+  g.fillStyle = m < 20 ? '#ff3b30' : '#fff';           // red when you're nearly out
+  g.font = 'bold 40px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(text, 96, 34);
+  lineTex.needsUpdate = true;
+}
 function setMeter(v, warn) {
+  // Drag mark and line counter only show during a fight
+  dragMark.visible = lineLabel.visible = !!warn;
+  dragMark.position.x = -0.3 + 0.6 * gear.drag / gear.lineStrength;
   meterFill.scale.x = Math.max(v, 0.01);
   // Green normally; for tension it goes yellow then red as it gets close to snapping
   meterFill.material.color.set(!warn || v < 0.5 ? 0x4cd964 : v < 0.8 ? 0xffcc00 : 0xff3b30);
@@ -394,7 +422,19 @@ function pickFishType() {
   return FISH_TYPES[0];
 }
 
-const fish = { type: null, cm: 0, rel: 0, strength: 0, stamina: 1, dist: 0, angle: 0, surgeUntil: 0, nextSurge: 0, wiggle: 0 };
+// ---------- The fight (modelled on Fishing Planet) ----------
+// Your gear (the Shop will sell upgrades):
+//   lineStrength = tension that snaps the line
+//   drag         = tension where the reel's drag starts letting line slip out, so a running
+//                  fish takes line instead of snapping it (unless you keep winding!)
+//   spool        = metres of line on the reel; if a fish strips it all, it's gone
+//   reelSpeed    = metres of line you wind in per second at full speed
+const gear = { lineStrength: 1, drag: 0.7, spool: 100, reelSpeed: 1.5 };
+
+// The hooked fish. x/z = where it is on the water, line = metres of line out,
+// dx/dz = the way it's swimming, running = making a run right now.
+const fish = { type: null, cm: 0, rel: 0, strength: 0, stamina: 1, x: 0, z: 0, line: 0, dx: 0, dz: -1,
+  running: false, runEnd: 0, nextRun: 0, runSpeed: 0, turn: 0, nextTurn: 0 };
 function hookFish(t) {
   const type = pickFishType();
   const rel = Math.random() ** 2;                      // mostly small for its kind, sometimes a big one
@@ -403,19 +443,29 @@ function hookFish(t) {
   fish.cm = type.min + (type.max - type.min) * rel;
   fish.strength = type.fight * (0.6 + 0.6 * rel);      // a small one fights much less than a big one
   fish.stamina = 1;
-  const dx = bobber.position.x - head.position.x, dz = bobber.position.z - head.position.z;
-  fish.dist = Math.hypot(dx, dz);
-  fish.angle = Math.atan2(-dx, -dz);
-  fish.nextSurge = t + surgeGap();
-  fish.surgeUntil = 0;
-  fish.wiggle = Math.random() * 10;
+  fish.x = bobber.position.x; fish.z = bobber.position.z;
+  fish.line = Math.hypot(fish.x - head.position.x, fish.z - head.position.z);
+  fish.running = false;
+  fish.nextRun = t + 0.3 + Math.random();              // most fish bolt soon after they feel the hook
+  fish.nextTurn = 0;
   tension = 0.2;
   slackSince = t;
   state = 'fighting';
   say('Fish on!', 1.5);
 }
-// Rarer, tougher fish surge more often and for longer
-function surgeGap() { return (1.5 + Math.random() * 3) / fish.type.fight; }
+// Time until the next run: tough fish run often; tired fish less
+function runGap() { return (1.5 + Math.random() * 3.5) / fish.type.fight ** 1.5 / (0.3 + 0.7 * fish.stamina); }
+function startRun(t) {
+  const f = fish, power = f.strength * (0.5 + 0.5 * f.stamina);
+  f.running = true;
+  f.runEnd = t + (1.2 + Math.random() * 2.3) * (0.5 + f.type.fight) * (0.4 + 0.6 * f.stamina);
+  f.runSpeed = 1.5 + 4.5 * power;                      // metres per second
+  // Mostly away from you, but often off to one side
+  const away = Math.atan2(f.z - head.position.z, f.x - head.position.x) + (Math.random() - 0.5) * 2.4;
+  f.dx = Math.cos(away); f.dz = Math.sin(away);
+  splashAt(bobber.position, t);
+  if (f.strength > 0.45) say('RUN!', 0.8);             // little fish just wriggle
+}
 
 function endFight(t, text, next) {
   say(text, 3);
@@ -585,23 +635,26 @@ function landFish(t) {
   cctx.fillStyle = rarity.color; cctx.font = 'bold 30px sans-serif'; cctx.fillText(rarity.label.toUpperCase(), 256, 105);
   cctx.fillStyle = '#fff'; cctx.font = '38px sans-serif'; cctx.fillText(`${Math.round(cm)} cm   +${points} pts`, 256, 160);
   cctx.fillStyle = '#ffcc00'; cctx.font = 'bold 38px sans-serif'; cctx.fillText(note, 256, 215);
-  cctx.fillStyle = '#9fb8c8'; cctx.font = '28px sans-serif'; cctx.fillText('Tap to keep fishing', 256, 280);
+  cctx.fillStyle = '#9fb8c8'; cctx.font = '28px sans-serif'; cctx.fillText('Keep it or let it go?', 256, 280);
   catchTex.needsUpdate = true;
   catchSign.visible = true;
+  showCatchButtons();
 }
 function closeCatch() {
   catchPivot.visible = false;
   catchSign.visible = false;
+  hideCatchButtons();
   bobber.visible = true;
   state = 'ready';
 }
 
 function press(now, fromPad) {
   if (!playing) return;
+  if (hovered) { held = false; hovered.userData.onClick(); return; } // looking at a button: press it
+  if (state === 'showing' || state === 'aquarium') return;           // these screens only use buttons
   held = !fromPad; // on a controller you wind with the stick instead
   if (state === 'ready') { state = 'charging'; chargeStart = now; power = 0; }
   else if (state === 'floating' && now - biteStart < BITE_WINDOW) hookFish(now);
-  else if (state === 'showing') { closeCatch(); held = false; } // don't start winding on the same tap
 }
 function release(now) {
   held = false;
@@ -630,7 +683,7 @@ addEventListener('keyup', e => { if (e.code === 'Space') release(clock.getElapse
 // (Standard button numbers: 5 = R, 7 = ZR, 9 = +. Button 0 kept for other pads.)
 const CAST_BUTTONS = [5, 7, 0];
 let padWasDown = false, plusWasDown = false;
-let crankAngle = null, crankSpeed = 0; // crankSpeed = stick turns per second (smoothed)
+let crankAngle = {}, crankSpeed = 0;   // last angle of each stick; crankSpeed = turns per second (smoothed)
 let lastPadT = 0, padStatus = '';
 function pollPad(now) {
   const dt = Math.min(0.1, now - lastPadT);
@@ -645,26 +698,32 @@ function pollPad(now) {
   if (plus && !plusWasDown) recentre();
   plusWasDown = plus;
 
-  // Crank: how fast is the right stick going round in circles?
+  // Crank: how fast is a stick going round in circles? Checks every stick on every
+  // controller, because Joy-Cons can show up as one pad or as two separate ones (left
+  // first), and a single sideways Joy-Con puts its stick on the first two axes.
   let rate = 0;
-  const p = pads[0];
-  if (p) {
-    const [x, y] = p.axes.length >= 4 ? [p.axes[2], p.axes[3]] : [p.axes[0] || 0, p.axes[1] || 0];
-    if (Math.hypot(x, y) > 0.6) {          // stick pushed out to the edge
-      const ang = Math.atan2(y, x);
-      if (crankAngle !== null && dt > 0) {
-        let d = ang - crankAngle;
-        if (d > Math.PI) d -= 2 * Math.PI;   // take the short way round
-        if (d < -Math.PI) d += 2 * Math.PI;
-        rate = Math.abs(d) / (2 * Math.PI) / dt;
-      }
-      crankAngle = ang;
-    } else crankAngle = null;
+  for (const p of pads) {
+    for (let a = 0; a + 1 < p.axes.length && a < 4; a += 2) {
+      const key = p.index + ':' + a, x = p.axes[a] || 0, y = p.axes[a + 1] || 0;
+      if (Math.hypot(x, y) > 0.6) {          // stick pushed out to the edge
+        const ang = Math.atan2(y, x);
+        if (crankAngle[key] !== undefined && dt > 0) {
+          let d = ang - crankAngle[key];
+          if (d > Math.PI) d -= 2 * Math.PI;   // take the short way round
+          if (d < -Math.PI) d += 2 * Math.PI;
+          const r = Math.abs(d) / (2 * Math.PI) / dt;
+          rate = Math.max(rate, r);
+        }
+        crankAngle[key] = ang;
+      } else delete crankAngle[key];
+    }
   }
   crankSpeed += (rate - crankSpeed) * Math.min(1, dt * 8); // smooth out the jitter
 
   // Show what's connected (and which buttons are down) on the catch log, to help set up
-  const status = p ? p.id.slice(0, 26) + '  ' + p.buttons.map((b, i) => b.pressed ? i : null).filter(i => i !== null).join(' ') : 'No controller';
+  const p = pads.find(q => CAST_BUTTONS.some(i => q.buttons[i] && q.buttons[i].pressed)) || pads[0];
+  const status = p ? pads.length + ' pad' + (pads.length > 1 ? 's' : '') + ': ' + p.id.slice(0, 20) + '  ' +
+    p.buttons.map((b, i) => b.pressed ? i : null).filter(i => i !== null).join(' ') + (crankSpeed > 0.2 ? '  winding' : '') : 'No controller';
   if (status !== padStatus) { padStatus = status; drawLog(); }
 }
 
@@ -672,14 +731,16 @@ let lastT = 0;
 function updateFishing(t) {
   const dt = Math.min(0.1, t - lastT); // seconds since last frame
   lastT = t;
+  if (state === 'aquarium') return;
   // Holding the screen / space = full-speed winding; otherwise however fast you spin the stick
-  const reel = held ? 1 : Math.min(1, crankSpeed);
+  const reel = held ? 1 : Math.min(1, crankSpeed * 1.5); // 2 turns every 3 seconds = full speed
   // Turn the body (and rod) to match where your head faces
   const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(head.quaternion);
-  body.rotation.y = Math.atan2(-fwd.x, -fwd.z);
+  // (Not while the catch screen is up, so you can look across to the Keep / Release buttons)
+  if (state !== 'showing') body.rotation.y = Math.atan2(-fwd.x, -fwd.z);
   body.position.copy(head.position);
   // Rod dips toward the fish as the line gets tight, and shakes on a surge
-  const surging = state === 'fighting' && t < fish.surgeUntil;
+  const surging = state === 'fighting' && fish.running;
   rod.rotation.x = -0.8 - tension * 0.3 + (surging ? Math.sin(t * 40) * 0.02 : 0);
   body.updateMatrixWorld();
   rodTip.getWorldPosition(tipPos);
@@ -728,31 +789,65 @@ function updateFishing(t) {
     sag = 0.4;
   }
   if (state === 'fighting') {
-    if (t > fish.nextSurge) {
-      fish.surgeUntil = t + (0.6 + Math.random()) * fish.type.fight;
-      fish.nextSurge = fish.surgeUntil + surgeGap();
-      splashAt(bobber.position, t);
+    const f = fish, px = head.position.x, pz = head.position.z;
+    // Runs: the fish bolts, then settles back to cruising
+    if (f.running && t > f.runEnd) { f.running = false; f.nextRun = t + runGap(); }
+    if (!f.running && t > f.nextRun) startRun(t);
+    // A fish that still has energy won't come in close quietly: it bolts again
+    if (!f.running && f.line < 9 && f.stamina > 0.3 && f.strength > 0.45) startRun(t);
+    if (!f.running && t > f.nextTurn) {               // cruising: wanders, changing direction now and then
+      f.turn = (Math.random() - 0.5) * 1.4;
+      f.nextTurn = t + 1 + Math.random() * 2;
+      if (Math.random() < 0.4) {                      // often heads away from you again
+        const away = Math.atan2(f.z - pz, f.x - px) + (Math.random() - 0.5) * 2;
+        f.dx = Math.cos(away); f.dz = Math.sin(away);
+      }
     }
-    // How hard the fish pulls right now: harder in a surge, weaker as it tires
-    const pull = fish.strength * (surging ? 1 : 0.45) * (0.4 + 0.6 * fish.stamina);
-    // reel = how hard you're winding, 0 (not at all) to 1 (full speed)
-    // Winding pulls the fish in but builds tension; a weak fish barely builds any.
-    // Not winding lets tension drop, but the fish swims off with line.
-    fish.dist -= (2.2 * (1 - pull * 0.6) * reel - pull * 1.2 * (1 - reel)) * dt;
-    tension += ((pull * 1.1 - 0.2) * reel - 0.5 * (1 - reel)) * dt;
-    fish.stamina = Math.max(0, fish.stamina - (0.1 / fish.type.fight) * reel * dt); // tough fish tire slower
-    tension = Math.max(0, tension);
-    if (reel > 0.05 || tension > 0.05) slackSince = t;
-    // Fish swims side to side
-    fish.angle += Math.sin(t * 0.8 + fish.wiggle) * 0.08 * fish.strength * (surging ? 3 : 1) * dt;
-    bobber.position.set(head.position.x - Math.sin(fish.angle) * fish.dist, -0.15, head.position.z - Math.cos(fish.angle) * fish.dist);
-    bobber.position.z = Math.min(bobber.position.z, -2.5);
+    if (!f.running) { const a = Math.atan2(f.dz, f.dx) + f.turn * dt; f.dx = Math.cos(a); f.dz = Math.sin(a); }
+    const speed = f.running ? f.runSpeed : 0.4 + 0.8 * f.strength * f.stamina;
+    // Where the fish is trying to swim to this frame
+    let nx = f.x + f.dx * speed * dt, nz = f.z + f.dz * speed * dt;
+    const want = Math.hypot(nx - px, nz - pz);
+    // How hard it pulls: only the part of its swimming that heads away from you counts
+    const dist = Math.max(0.1, Math.hypot(f.x - px, f.z - pz));
+    const outward = Math.max(0, (f.dx * (f.x - px) + f.dz * (f.z - pz)) / dist);
+    const pull = f.strength * (f.running ? 1.3 : 0.4) * (0.35 + 0.65 * f.stamina) * (0.3 + 0.7 * outward);
+    // reel = how hard you're winding (0 to 1). Winding is slower against a heavy fish.
+    const wind = reel * gear.reelSpeed * Math.max(0.12, 1 - pull / gear.drag) * dt;
+    let target, slipping = false;
+    if (want >= f.line - 0.05) {
+      // Line is tight
+      target = pull + reel * 0.3;
+      if (pull > gear.drag) {
+        // Drag slips: the fish takes line. Winding now strains the line more, and a fish
+        // pulling way harder than your drag strains it too (that's when you need better gear).
+        slipping = true;
+        f.line = Math.max(f.line, want);
+        target = gear.drag + reel * 0.32 + (pull - gear.drag) * 0.5;
+      } else {
+        f.line = Math.max(2, f.line - wind);
+      }
+      // The fish can't get further away than the line: it gets swung round in an arc or dragged in
+      if (want > f.line) { const k = f.line / want; nx = px + (nx - px) * k; nz = pz + (nz - pz) * k; }
+    } else {
+      // Fish swam towards you: the line goes slack until you wind it up
+      target = 0.02;
+      f.line = Math.max(want, f.line - reel * gear.reelSpeed * dt);
+    }
+    f.x = nx; f.z = Math.min(nz, -2.5);
+    // Tension follows the target quickly but not instantly, so you get a moment to react
+    tension += (target - tension) * Math.min(1, dt * 4);
+    // The fish tires: faster when it's running against the drag or pulling hard; tough fish last longer
+    f.stamina = Math.max(0, f.stamina - dt * (0.004 + (slipping ? 0.02 : 0) + tension * 0.02) / f.type.fight ** 2);
+    if (tension > 0.05) slackSince = t;
+    bobber.position.set(f.x, -0.15, f.z);
     setMeter(tension, true);
+    setLineLeft(gear.spool - f.line);
 
-    if (tension >= 1) endFight(t, 'Snap! Line broke', 'ready');
-    else if (fish.dist > 35) endFight(t, 'It got away!', 'floating');
-    else if (t - slackSince > 4) endFight(t, 'Slack line, it got off!', 'floating');
-    else if (fish.dist < 2.5) landFish(t);
+    if (tension >= gear.lineStrength) endFight(t, 'Snap! Line broke', 'ready');
+    else if (f.line >= gear.spool) endFight(t, 'Out of line! It got away', 'ready');
+    else if (t - slackSince > 3) endFight(t, 'Slack line, it got off!', 'floating');
+    else if (f.line < 3) landFish(t);
   }
   if (state === 'showing') {
     catchPivot.rotation.y = t * 0.8;                 // slowly turn so you can see both sides
@@ -1138,6 +1233,324 @@ function drawLog() {
 }
 drawLog();
 
+// ---------- Aquarium ----------
+if (!CanvasRenderingContext2D.prototype.roundRect) CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h) { this.rect(x, y, w, h); };
+// Older saves don't have these yet
+records.money = records.money || 0;
+records.tank = records.tank || [];        // fish you've kept: { name, cm, rel, at }
+records.tankSize = records.tankSize || 5;
+
+// ---------- Buttons and the look-and-tap pointer ----------
+// In the headset you can't touch buttons, so: a dot sits in the middle of your view,
+// look at a button so it lights up, then tap the screen (or press ZR) to choose it.
+let activeScene = scene;                  // which world you're in: the river or the aquarium
+const clickables = [];                    // everything the pointer can choose
+let hovered = null;
+
+function makeButton(label, w, h, bg, onClick) {
+  const c = document.createElement('canvas');
+  c.width = 320; c.height = Math.round(320 * h / w);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: tex, transparent: true }));
+  m.renderOrder = 5;
+  m.userData = { onClick, enabled: true, canvas: c, tex };
+  setButton(m, label, bg, true);
+  clickables.push(m);
+  return m;
+}
+function setButton(m, label, bg, enabled) {
+  const { canvas: c, tex } = m.userData, g = c.getContext('2d');
+  g.clearRect(0, 0, c.width, c.height);
+  g.fillStyle = enabled ? bg : '#55606a';
+  g.beginPath(); g.roundRect(4, 4, c.width - 8, c.height - 8, 18); g.fill();
+  g.fillStyle = enabled ? '#fff' : '#b8c0c8';
+  g.font = `bold ${Math.round(c.height * 0.36)}px sans-serif`;
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(label, c.width / 2, c.height / 2 + 2);
+  tex.needsUpdate = true;
+  m.userData.enabled = enabled;
+}
+
+// The dot in the middle of your view
+const reticle = new THREE.Mesh(new THREE.RingGeometry(0.008, 0.014, 20),
+  new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.7, depthTest: false }));
+reticle.position.z = -1;
+reticle.renderOrder = 20;
+head.add(reticle);
+
+// Is this object actually showing in the world you're in right now?
+function isShown(o) {
+  for (; o; o = o.parent) { if (!o.visible) return false; if (o === activeScene) return true; }
+  return false;
+}
+const ray = new THREE.Raycaster(), rayOrigin = new THREE.Vector3(), rayDir = new THREE.Vector3();
+function updatePointer() {
+  activeScene.updateMatrixWorld();         // use where things are right now (fish keep swimming)
+  head.getWorldPosition(rayOrigin);
+  rayDir.set(0, 0, -1).applyQuaternion(head.getWorldQuaternion(new THREE.Quaternion()));
+  ray.set(rayOrigin, rayDir);
+  const hit = ray.intersectObjects(clickables.filter(isShown), false)[0];
+  const now = hit && hit.object.userData.enabled ? hit.object : null;
+  if (now !== hovered) {
+    if (hovered) hovered.scale.setScalar(1);
+    hovered = now;
+    if (hovered) hovered.scale.setScalar(1.08);  // lights up / grows a little
+  }
+  reticle.material.color.set(hovered ? 0xffb347 : 0xffffff);
+  reticle.scale.setScalar(hovered ? 1.6 : 1);
+}
+
+// ---------- Keep / Release on the catch screen ----------
+const SELL = { common: 5, uncommon: 12, rare: 30, epic: 80, legendary: 200, mythic: 600 }; // $ for an average one
+function sellPrice(f) {
+  const type = FISH_TYPES.find(x => x.name === f.name);
+  return Math.round(SELL[type.rarity] * (0.6 + 0.8 * f.rel));
+}
+const keepBtn = makeButton('Keep', 0.34, 0.14, '#3a9d4f', () => {
+  records.tank.push({ name: fish.type.name, cm: fish.cm, rel: fish.rel, at: Date.now() });
+  saveRecords();
+  closeCatch();
+  say('Into the tank!', 2);
+});
+const releaseBtn = makeButton('Release', 0.34, 0.14, '#d64545', () => {
+  closeCatch();
+  splashAt(new THREE.Vector3(0.5, 0, -3), clock.getElapsedTime());
+  say('Released', 1.5);
+});
+keepBtn.position.set(-0.3, -0.62, -1.15);
+releaseBtn.position.set(0.3, -0.62, -1.15);
+keepBtn.visible = releaseBtn.visible = false;
+body.add(keepBtn, releaseBtn);
+function showCatchButtons() {
+  const full = records.tank.length >= records.tankSize;
+  setButton(keepBtn, full ? 'Tank full' : 'Keep', '#3a9d4f', !full);
+  keepBtn.visible = releaseBtn.visible = true;
+}
+function hideCatchButtons() { keepBtn.visible = releaseBtn.visible = false; }
+
+// Aquarium button on top of the catch log
+const aquaBtn = makeButton('Aquarium', 0.6, 0.16, '#1f6fb2', () => openAquarium());
+aquaBtn.position.set(0, 0.82, 0.01);
+board.add(aquaBtn);
+
+// ---------- The aquarium room ----------
+const aquaScene = new THREE.Scene();
+aquaScene.background = new THREE.Color(0xd8d4cc);
+aquaScene.add(new THREE.HemisphereLight(0xffffff, 0x8a7a68, 1.2));
+const aquaSun = new THREE.DirectionalLight(0xffffff, 1.2);
+aquaSun.position.set(2, 5, 4);
+aquaScene.add(aquaSun);
+const tankLight = new THREE.PointLight(0x9fd4ff, 6, 6);
+tankLight.position.set(0, 2.3, -2.4);
+aquaScene.add(tankLight);
+const amat = c => new THREE.MeshLambertMaterial({ color: c, flatShading: true });
+const aput = (geo, color, x, y, z) => { const m = new THREE.Mesh(geo, amat(color)); m.position.set(x, y, z); aquaScene.add(m); return m; };
+
+// Room
+const room = new THREE.Mesh(new THREE.BoxGeometry(10, 4, 10), new THREE.MeshLambertMaterial({ color: 0xd8d4cc, side: THREE.BackSide }));
+room.position.set(0, 2, -1);
+aquaScene.add(room);
+aput(new THREE.BoxGeometry(10, 0.02, 10), 0x6b5a48, 0, 0.01, -1);          // floor
+// Tank: black cabinet, black lid, see-through blue water, sand, rocks and coral
+const TANK = { x: 0, y: 1.65, z: -2.4, w: 4.2, h: 1.5, d: 1.1 };
+aput(new THREE.BoxGeometry(4.5, 0.85, 1.3), 0x1c1c1e, 0, 0.45, TANK.z);
+aput(new THREE.BoxGeometry(4.5, 0.25, 1.3), 0x1c1c1e, 0, TANK.y + TANK.h / 2 + 0.12, TANK.z);
+aput(new THREE.BoxGeometry(TANK.w, 0.1, TANK.d), 0xe8dcc0, 0, TANK.y - TANK.h / 2 + 0.05, TANK.z); // sand
+for (let i = 0; i < 9; i++) {
+  const rock = aput(new THREE.IcosahedronGeometry(0.15 + Math.random() * 0.2, 0), [0x8a8580, 0x6f6a64, 0xa89c88][i % 3],
+    -1.9 + i * 0.47, TANK.y - TANK.h / 2 + 0.15, TANK.z - 0.3 + Math.random() * 0.15);
+  rock.scale.y = 0.7;
+}
+for (let i = 0; i < 7; i++) {                                               // coral
+  const x = -1.8 + Math.random() * 3.6, z = TANK.z - 0.35 + Math.random() * 0.2;
+  for (let k = 0; k < 4; k++) {
+    const b = aput(new THREE.CylinderGeometry(0.02, 0.04, 0.3 + Math.random() * 0.3, 5), [0xe87a7a, 0xf2a65a, 0xc77dd8][i % 3],
+      x + (Math.random() - 0.5) * 0.15, TANK.y - TANK.h / 2 + 0.3, z);
+    b.rotation.z = (Math.random() - 0.5) * 0.8;
+  }
+}
+const waterBox = new THREE.Mesh(new THREE.BoxGeometry(TANK.w, TANK.h, TANK.d),
+  new THREE.MeshPhongMaterial({ color: 0x2f86d6, transparent: true, opacity: 0.4, depthWrite: false, shininess: 80 }));
+waterBox.position.set(0, TANK.y, TANK.z);
+waterBox.renderOrder = 2;
+aquaScene.add(waterBox);
+// Deep blue back wall inside the tank, so it reads as water
+const tankBack = new THREE.Mesh(new THREE.PlaneGeometry(TANK.w, TANK.h), new THREE.MeshBasicMaterial({ color: 0x1d5f9e }));
+tankBack.position.set(0, TANK.y, TANK.z - TANK.d / 2 + 0.01);
+aquaScene.add(tankBack);
+// Bubbles rising from the back corners
+const bubbles = [];
+for (let i = 0; i < 24; i++) {
+  const b = new THREE.Mesh(new THREE.SphereGeometry(0.015 + Math.random() * 0.015, 6, 4),
+    new THREE.MeshBasicMaterial({ color: 0xe8f6ff, transparent: true, opacity: 0.7 }));
+  b.position.set(i % 2 ? 1.85 : -1.85, TANK.y - TANK.h / 2 + Math.random() * TANK.h, TANK.z - 0.4);
+  aquaScene.add(b);
+  bubbles.push(b);
+}
+
+// Sign above the tank: money and how full the tank is
+const moneyCanvas = document.createElement('canvas');
+moneyCanvas.width = 1024; moneyCanvas.height = 128;
+const moneyTex = new THREE.CanvasTexture(moneyCanvas);
+moneyTex.colorSpace = THREE.SRGBColorSpace;
+const moneySign = new THREE.Mesh(new THREE.PlaneGeometry(3.2, 0.4), new THREE.MeshBasicMaterial({ map: moneyTex, transparent: true }));
+moneySign.position.set(-0.4, 2.95, TANK.z + 0.66);
+aquaScene.add(moneySign);
+function drawMoney(hint) {
+  const g = moneyCanvas.getContext('2d');
+  g.clearRect(0, 0, 1024, 128);
+  g.fillStyle = 'rgba(16,32,44,0.9)'; g.beginPath(); g.roundRect(0, 0, 1024, 128, 20); g.fill();
+  g.fillStyle = '#ffcc00'; g.font = 'bold 54px sans-serif'; g.textBaseline = 'middle';
+  g.fillText(`Money: $${records.money}`, 30, 46);
+  g.fillStyle = '#fff'; g.font = '40px sans-serif';
+  g.fillText(`Tank: ${records.tank.length}/${records.tankSize} fish`, 560, 46);
+  g.fillStyle = '#9fb8c8'; g.font = '30px sans-serif';
+  g.fillText(hint, 30, 102);
+  moneyTex.needsUpdate = true;
+}
+const backBtn = makeButton('Back', 0.6, 0.3, '#1f6fb2', () => (selected ? deselectFish() : closeAquarium()));
+backBtn.position.set(1.65, 2.95, TANK.z + 0.66);
+aquaScene.add(backBtn);
+const shopBtn = makeButton('Shop (coming soon)', 1.2, 0.3, '#1f6fb2', () => {});
+shopBtn.position.set(0, 0.5, TANK.z + 0.66);
+setButton(shopBtn, 'Shop (coming soon)', '#1f6fb2', false);
+aquaScene.add(shopBtn);
+
+// Info panel for the fish you've picked (to the right of the tank)
+const infoCanvas = document.createElement('canvas');
+infoCanvas.width = 512; infoCanvas.height = 400;
+const infoTex = new THREE.CanvasTexture(infoCanvas);
+infoTex.colorSpace = THREE.SRGBColorSpace;
+const infoPanel = new THREE.Group();
+infoPanel.position.set(1.55, 1.7, -1.6);
+infoPanel.rotation.y = -0.5;              // turned to face you
+infoPanel.visible = false;
+aquaScene.add(infoPanel);
+infoPanel.add(new THREE.Mesh(new THREE.PlaneGeometry(1, 0.78), new THREE.MeshBasicMaterial({ map: infoTex, transparent: true })));
+const sellBtn = makeButton('Sell', 0.7, 0.18, '#3a9d4f', () => sellFish());
+sellBtn.position.set(0, -0.53, 0.01);
+infoPanel.add(sellBtn);
+
+// ---------- Fish in the tank ----------
+// Swimming version of a fish model: upright, nose along +x
+function makeSwimModel(type, cm) {
+  const m = makeFishModel(type, cm), outer = new THREE.Group();
+  if (type.look.shape === 'ray') {
+    const mid = new THREE.Group();
+    m.position.y = 0;
+    m.rotation.x = -Math.PI / 2;          // lie flat, brown side up
+    mid.rotation.y = -Math.PI / 2;        // nose forward
+    mid.add(m); outer.add(mid);
+  } else {
+    m.rotation.z = 0; m.position.y = 0;   // undo the "hanging from the line" pose
+    outer.add(m);
+  }
+  // Small fish shown a bit bigger so you can see them; big ones shrunk to fit the tank
+  const len = cm / 100;
+  outer.scale.setScalar(len < 0.45 ? Math.min(2, 0.45 / len) : Math.min(1, 0.8 / len));
+  return outer;
+}
+let tankFish = [], selected = null;
+function fillTank() {
+  for (const f of tankFish) { aquaScene.remove(f.g); clickables.splice(clickables.indexOf(f.hit), 1); }
+  tankFish = records.tank.map(rec => {
+    const type = FISH_TYPES.find(x => x.name === rec.name);
+    const g = makeSwimModel(type, rec.cm);
+    g.position.copy(randomTankSpot());
+    // Big invisible box around the fish, so it's easy to point at while it swims
+    const hit = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.35, 0.35), new THREE.MeshBasicMaterial({ visible: false }));
+    g.add(hit);
+    const f = { rec, type, g, hit, target: randomTankSpot(), heading: 0, speed: 0.2 + Math.random() * 0.15 };
+    hit.userData = { enabled: true, onClick: () => selectFish(f) };
+    clickables.push(hit);
+    aquaScene.add(g);
+    return f;
+  });
+  drawMoney('Look at a fish and tap to see it');
+}
+function randomTankSpot() {
+  return new THREE.Vector3((Math.random() - 0.5) * (TANK.w - 0.8), TANK.y + (Math.random() - 0.4) * (TANK.h - 0.7), TANK.z + (Math.random() - 0.5) * (TANK.d - 0.5));
+}
+function selectFish(f) {
+  selected = f;
+  const r = RARITY[f.type.rarity];
+  const g = infoCanvas.getContext('2d');
+  g.clearRect(0, 0, 512, 400);
+  g.fillStyle = 'rgba(16,32,44,0.92)'; g.beginPath(); g.roundRect(0, 0, 512, 400, 24); g.fill();
+  g.textAlign = 'center'; g.fillStyle = '#fff'; g.font = 'bold 50px sans-serif'; g.fillText(f.type.name, 256, 70);
+  g.fillStyle = r.color; g.font = 'bold 32px sans-serif'; g.fillText(r.label.toUpperCase(), 256, 120);
+  g.fillStyle = '#fff'; g.font = '40px sans-serif'; g.fillText(`${Math.round(f.rec.cm)} cm`, 256, 190);
+  g.fillStyle = '#9fb8c8'; g.font = '28px sans-serif';
+  g.fillText(`Caught ${new Date(f.rec.at).toLocaleDateString('en-AU')}`, 256, 245);
+  g.fillText('Feeding: coming soon', 256, 290);
+  infoTex.needsUpdate = true;
+  setButton(sellBtn, `Sell  $${sellPrice(f.rec)}`, '#3a9d4f', true);
+  infoPanel.visible = true;
+  for (const o of tankFish) o.hit.userData.enabled = false;  // pointer only on the panel now
+  drawMoney('Back to see all your fish');
+}
+function deselectFish() {
+  selected = null;
+  infoPanel.visible = false;
+  for (const o of tankFish) o.hit.userData.enabled = true;
+  drawMoney('Look at a fish and tap to see it');
+}
+function sellFish() {
+  const price = sellPrice(selected.rec);
+  records.money += price;
+  records.tank.splice(records.tank.indexOf(selected.rec), 1);
+  saveRecords();
+  deselectFish();
+  fillTank();
+  say(`Sold for $${price}`, 2);
+}
+
+function openAquarium() {
+  if (state !== 'ready') { say('Reel in first', 1.5); return; }
+  state = 'aquarium';
+  aquaScene.add(head);          // move "you" (and your eyes) into the aquarium room
+  head.position.z = 1.2;        // standing back a bit so the whole tank fits in view
+  activeScene = aquaScene;
+  fillTank();
+}
+function closeAquarium() {
+  deselectFish();
+  scene.add(head);
+  head.position.z = 0;
+  activeScene = scene;
+  state = 'ready';
+}
+
+let lastAquaT = 0;
+function updateAquarium(t) {
+  const dt = Math.min(0.1, t - lastAquaT);
+  lastAquaT = t;
+  if (activeScene !== aquaScene) return;
+  for (const f of tankFish) {
+    // The picked fish swims slow little loops at the front middle; the rest wander about
+    const goal = f === selected
+      ? new THREE.Vector3(Math.sin(t * 0.6) * 0.35, TANK.y + Math.sin(t * 1.1) * 0.08, TANK.z + 0.3)
+      : f.target;
+    const to = goal.clone().sub(f.g.position);
+    if (f !== selected && to.length() < 0.15) f.target = randomTankSpot();
+    const want = Math.atan2(-to.z, to.x);
+    let turn = want - f.heading;
+    turn = Math.atan2(Math.sin(turn), Math.cos(turn));      // shortest way round
+    f.heading += turn * Math.min(1, dt * 2.5);
+    const sp = (f === selected ? 0.12 : f.speed) * Math.min(1, to.length() * 3);
+    f.g.position.x += Math.cos(f.heading) * sp * dt;
+    f.g.position.z -= Math.sin(f.heading) * sp * dt;
+    f.g.position.y += Math.sign(to.y) * Math.min(Math.abs(to.y), 0.1 * dt);
+    f.g.rotation.y = f.heading + Math.sin(t * 7 + f.speed * 50) * 0.08;  // face where it's going, tail wiggle
+  }
+  for (const b of bubbles) {
+    b.position.y += 0.25 * dt;
+    if (b.position.y > TANK.y + TANK.h / 2 - 0.05) b.position.y = TANK.y - TANK.h / 2 + 0.1;
+  }
+}
+
+
 // ---------- Head tracking (phone gyro) ----------
 // Converts the phone's orientation angles into a rotation for the head.
 // This is the standard maths three.js used to ship as DeviceOrientationControls.
@@ -1230,6 +1643,8 @@ function frame() {
   pollPad(t);
   updateFishing(t);
   updateWildlife(t);
+  updateAquarium(t);
+  updatePointer();
 
   // Render twice: left half of the screen for the left eye, right half for the right
   const w = innerWidth / 2, h = innerHeight;
@@ -1238,7 +1653,7 @@ function frame() {
     cam.updateProjectionMatrix();
     renderer.setViewport(x, 0, w, h);
     renderer.setScissor(x, 0, w, h);
-    renderer.render(scene, cam);
+    renderer.render(activeScene, cam);
   }
   requestAnimationFrame(frame);
 }

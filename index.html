@@ -649,9 +649,17 @@ function closeCatch() {
   state = 'ready';
 }
 
+// If something breaks, keep going, and write what happened on the catch log so it can be fixed
+let lastBug = '';
+function showBug(e) {
+  lastBug = 'Bug: ' + (e && e.message ? e.message : e);
+  console.error(e);
+  try { drawLog(); say('Bug! See catch log', 4); } catch {}
+}
+addEventListener('error', e => showBug(e.error || e.message));
 function press(now, fromPad) {
   if (!playing) return;
-  if (hovered) { held = false; hovered.userData.onClick(); return; } // looking at a button: press it
+  if (hovered) { held = false; try { hovered.userData.onClick(); } catch (e) { showBug(e); } return; } // looking at a button: press it
   if (state === 'showing' || state === 'aquarium' || state === 'shop') return; // these screens only use buttons
   held = !fromPad; // on a controller you wind with the stick instead
   if (state === 'ready') { state = 'charging'; chargeStart = now; power = 0; }
@@ -1233,6 +1241,7 @@ function drawLog() {
   });
   bctx.fillStyle = '#5d7383'; bctx.font = '18px sans-serif';
   bctx.fillText(padStatus, 24, 490);
+  if (lastBug) { bctx.fillStyle = '#ff6b5e'; bctx.font = '16px sans-serif'; bctx.fillText(lastBug.slice(0, 55), 24, 466); }
   boardTex.needsUpdate = true;
 }
 drawLog();
@@ -1507,12 +1516,15 @@ function deselectFish() {
   drawMoney('Look at a fish and tap to see it');
 }
 function sellFish() {
-  const price = sellPrice(selected.rec);
+  const f = selected, price = sellPrice(f.rec);
   records.money += price;
-  records.tank.splice(records.tank.indexOf(selected.rec), 1);
+  records.tank.splice(records.tank.indexOf(f.rec), 1);
   saveRecords();
   deselectFish();
-  fillTank();
+  aquaScene.remove(f.g);
+  clickables.splice(clickables.indexOf(f.hit), 1);
+  tankFish.splice(tankFish.indexOf(f), 1);
+  drawMoney('Look at a fish and tap to see it');
   say(`Sold for $${price}`, 2);
 }
 
@@ -2136,6 +2148,7 @@ document.getElementById('go').addEventListener('click', async () => {
 // ---------- Draw loop ----------
 const clock = new THREE.Clock();
 function frame() {
+  requestAnimationFrame(frame);
   const t = clock.getElapsedTime();
 
   // Waves
@@ -2167,7 +2180,6 @@ function frame() {
     renderer.setScissor(x, 0, w, h);
     renderer.render(activeScene, cam);
   }
-  requestAnimationFrame(frame);
 }
 addEventListener('resize', () => renderer.setSize(innerWidth, innerHeight));
 frame();

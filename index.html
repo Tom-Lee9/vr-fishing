@@ -469,7 +469,6 @@ function startRun(t) {
   const away = Math.atan2(f.z - head.position.z, f.x - head.position.x) + (Math.random() - 0.5) * 2.4;
   f.dx = Math.cos(away); f.dz = Math.sin(away);
   splashAt(bobber.position, t);
-  if (f.strength > 0.45) say('RUN!', 0.8);             // little fish just wriggle
 }
 
 function endFight(t, text, next) {
@@ -690,6 +689,24 @@ addEventListener('touchend', e => { if (e.touches.length === 0) release(clock.ge
 // On the PC: space bar
 addEventListener('keydown', e => { if (e.code === 'Space' && !e.repeat) press(clock.getElapsedTime()); });
 addEventListener('keyup', e => { if (e.code === 'Space') release(clock.getElapsedTime()); });
+// ---------- Reel controller (micro:bit pretending to be a Bluetooth keyboard) ----------
+// "w" = the reel went round half a turn, 1-9 = a flick of the rod (9 = hardest)
+let reelTicks = [], reelStatus = '';
+addEventListener('keydown', e => {
+  const now = clock.getElapsedTime();
+  if (e.key === 'w' || e.key === 'W') { reelTicks.push(now); reelStatus = 'Reel: winding'; }
+  else if (e.key >= '1' && e.key <= '9') { flick(+e.key / 9, now); reelStatus = 'Reel: flick ' + e.key; }
+});
+function flick(strength, now) {
+  if (!playing) return;
+  if (state === 'ready') { state = 'charging'; power = strength; release(now); }       // cast straight away
+  else if (state === 'floating' && now - biteStart < BITE_WINDOW) hookFish(now);    // strike!
+}
+// How fast the reel is winding, 0 to 1 (10 half-turns a second = full speed)
+function reelKeySpeed(t) {
+  while (reelTicks.length && t - reelTicks[0] > 0.6) reelTicks.shift();
+  return Math.min(1, reelTicks.length / 0.6 / 10);
+}
 // ---------- Controller (Joy-Cons) ----------
 // Checked every frame. ZR or R = cast / hook / close the catch screen,
 // spin the right stick in circles = wind the reel, + = re-centre.
@@ -741,8 +758,9 @@ function pollPad(now) {
 
   // Show what's connected (and which buttons are down) on the catch log, to help set up
   const p = pads.find(q => CAST_BUTTONS.some(i => q.buttons[i] && q.buttons[i].pressed)) || pads[0];
-  const status = p ? pads.length + ' pad' + (pads.length > 1 ? 's' : '') + ': ' + p.id.slice(0, 20) + '  ' +
+  let status = p ? pads.length + ' pad' + (pads.length > 1 ? 's' : '') + ': ' + p.id.slice(0, 20) + '  ' +
     p.buttons.map((b, i) => b.pressed ? i : null).filter(i => i !== null).join(' ') + (crankSpeed > 0.2 ? '  winding' : '') : 'No controller';
+  status += reelStatus ? '   ' + reelStatus : '';
   if (status !== padStatus) { padStatus = status; drawLog(); }
 }
 
@@ -752,7 +770,7 @@ function updateFishing(t) {
   lastT = t;
   if (state === 'aquarium' || state === 'shop') return;
   // Holding the screen / space = full-speed winding; otherwise however fast you spin the stick
-  const reel = held ? 1 : Math.min(1, crankSpeed * 1.5); // 2 turns every 3 seconds = full speed
+  const reel = held ? 1 : Math.max(Math.min(1, crankSpeed * 1.5), reelKeySpeed(t)); // stick: 2 turns every 3 seconds = full speed
   // Turn the body (and rod) to match where your head faces
   const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(head.quaternion);
   // (Not while the catch screen is up, so you can look across to the Keep / Release buttons)

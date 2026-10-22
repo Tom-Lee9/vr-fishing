@@ -27,8 +27,9 @@
   <h1>🎣 VR Fishing: Noosa River</h1>
   <p>Turn your phone sideways. Tap Start, allow motion access, then slide it into the headset.</p>
   <button id="go" disabled>Loading…</button>
+  <button id="reelBtn" style="display:none;background:#3a7d44">Connect reel</button>
   <p id="msg"></p>
-  <p>Hold the screen (or headset button) to charge a cast, let go to throw it where you're looking. When the bobber gets pulled under, tap fast to hook the fish. Then hold to reel in. When the fish makes a run (RUN!), stop winding and let it take line, or the line snaps. The white mark on the bar is your drag; the number shows how much line is left. Hold with no fish on to wind back in. After a catch, look at Keep or Release and tap. Look at the Aquarium button under your catch log to visit your fish. Your catch log is on your left. Two-finger tap re-centres.</p>
+  <p>Hold the screen (or headset button) to charge a cast, let go to throw it where you're looking. When the bobber gets pulled under, tap fast to hook the fish. Then hold to reel in. When the fish makes a run, stop winding and let it take line, or the line snaps. The white mark on the bar is your drag; the number shows how much line is left. Hold with no fish on to wind back in. After a catch, look at Keep or Release and tap. Look at the Aquarium button under your catch log to visit your fish. Your catch log is on your left. Two-finger tap re-centres.</p>
   <p>Joy-Cons: hold ZR or R to cast, press it to hook, spin the right stick in circles to reel, + re-centres.</p>
   <p>Buy a boat in the Aquarium's Shop, then press Y (or look at "Get in the boat" under the catch log). Push a stick to drive. Look down-left at the dashboard to get back on the jetty.</p>
 </div>
@@ -689,14 +690,82 @@ addEventListener('touchend', e => { if (e.touches.length === 0) release(clock.ge
 // On the PC: space bar
 addEventListener('keydown', e => { if (e.code === 'Space' && !e.repeat) press(clock.getElapsedTime()); });
 addEventListener('keyup', e => { if (e.code === 'Space') release(clock.getElapsedTime()); });
-// ---------- Reel controller (micro:bit pretending to be a Bluetooth keyboard) ----------
-// "w" = the reel went round half a turn, 1-9 = a flick of the rod (9 = hardest)
+// ---------- Reel controller (micro:bit on the reel, over Bluetooth) ----------
+// Reel -> game: "w<count>" = total half-turns so far, "f<1-9>" = a flick of the rod (9 = hardest)
+// Game -> reel: what's happening ("ready", "flying", "floating", "bite", "fighting", "run",
+//   "caught", "lost") and "t<0-9>" = how tight the line is during a fight
+// Only works in a browser with Bluetooth (Bluefy on iPhone). The keyboard keys still work for testing.
 let reelTicks = [], reelStatus = '';
 addEventListener('keydown', e => {
   const now = clock.getElapsedTime();
   if (e.key === 'w' || e.key === 'W') { reelTicks.push(now); reelStatus = 'Reel: winding'; }
   else if (e.key >= '1' && e.key <= '9') { flick(+e.key / 9, now); reelStatus = 'Reel: flick ' + e.key; }
 });
+const UART = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+let reelOut = null, reelCount = -1, reelBuf = '', reelSending = false, reelQueue = [];
+async function connectReel() {
+  const dev = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: 'BBC micro:bit' }], optionalServices: [UART] });
+  dev.addEventListener('gattserverdisconnected', () => { reelOut = null; reelStatus = 'Reel: disconnected'; });
+  const server = await dev.gatt.connect();
+  const uart = await server.getPrimaryService(UART);
+  // One part sends to us, one part we write to (worked out from what each one can do)
+  for (const c of await uart.getCharacteristics()) {
+    if (c.properties.notify || c.properties.indicate) {
+      c.addEventListener('characteristicvaluechanged', e => readReel(new TextDecoder().decode(e.target.value)));
+      await c.startNotifications();
+    } else if (c.properties.write || c.properties.writeWithoutResponse) reelOut = c;
+  }
+  reelStatus = 'Reel: connected';
+  lastReelSaid = '';
+  reelCount = -1;
+}
+function readReel(text) {
+  reelBuf += text;
+  let i;
+  while ((i = reelBuf.indexOf('\n')) >= 0) {
+    const line = reelBuf.slice(0, i).trim();
+    reelBuf = reelBuf.slice(i + 1);
+    const now = clock.getElapsedTime();
+    if (line[0] === 'w') {
+      const n = +line.slice(1);
+      if (reelCount >= 0) for (let k = 0; k < Math.min(20, n - reelCount); k++) reelTicks.push(now);
+      reelCount = n;
+      reelStatus = 'Reel: winding ' + n;
+    } else if (line[0] === 'f') { flick(+line.slice(1) / 9, now); reelStatus = 'Reel: flick ' + line.slice(1); }
+  }
+}
+// Send one message at a time (Bluetooth gets upset if two overlap)
+function tellReel(text) {
+  if (!reelOut) return;
+  reelQueue = reelQueue.filter(m => m[0] !== 't');     // an old tightness number is out of date
+  reelQueue.push(text);
+  if (reelSending) return;
+  reelSending = true;
+  (async () => {
+    while (reelQueue.length && reelOut) {
+      const m = reelQueue.shift();
+      try { await reelOut.writeValue(new TextEncoder().encode(m + '\n')); } catch (e) { console.warn(e); }
+    }
+    reelSending = false;
+  })();
+}
+// Called every frame: tells the reel when something changes
+let lastReelSaid = '', lastTightSent = -1, lastTightT = 0;
+function updateReelLink(t) {
+  if (!reelOut) return;
+  let now = state === 'charging' ? 'ready' : state;
+  if (state === 'floating' && t - biteStart < BITE_WINDOW) now = 'bite';
+  if (state === 'fighting' && fish.running) now = 'run';
+  if (state === 'showing') now = 'caught';
+  if (now !== lastReelSaid) {
+    if (lastReelSaid === 'fighting' || lastReelSaid === 'run') if (now === 'ready' || now === 'floating') now = 'lost';
+    if (now !== lastReelSaid) { tellReel(now); lastReelSaid = now; return; }
+  }
+  if ((state === 'fighting') && t - lastTightT > 0.2) {
+    const tight = Math.max(0, Math.min(9, Math.round(tension / gear.lineStrength * 9)));
+    if (tight !== lastTightSent) { tellReel('t' + tight); lastTightSent = tight; lastTightT = t; }
+  }
+}
 function flick(strength, now) {
   if (!playing) return;
   if (state === 'ready') { state = 'charging'; power = strength; release(now); }       // cast straight away
@@ -2184,6 +2253,15 @@ document.getElementById('go').addEventListener('click', async () => {
   try { navigator.wakeLock?.request('screen').catch(() => {}); } catch {}
 });
 
+// Connect reel button: only shows up in a browser that can do Bluetooth (Bluefy on iPhone)
+const reelBtn = document.getElementById('reelBtn');
+if (navigator.bluetooth) reelBtn.style.display = '';
+reelBtn.addEventListener('click', async () => {
+  reelBtn.textContent = 'Connecting…';
+  try { await connectReel(); reelBtn.textContent = 'Reel connected ✓'; }
+  catch (e) { reelBtn.textContent = 'Connect reel'; msg.textContent = 'Reel: ' + e.message; }
+});
+
 // ---------- Draw loop ----------
 const clock = new THREE.Clock();
 function frame() {
@@ -2203,6 +2281,7 @@ function frame() {
   if (!updateHeadFromGyro()) head.rotation.set(mousePitch, mouseYaw + viewYaw, 0, 'YXZ');
   head.updateMatrixWorld();
   pollPad(t);
+  updateReelLink(t);
   updateBoat(t);
   updateFishing(t);
   updateWildlife(t);

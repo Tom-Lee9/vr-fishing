@@ -703,11 +703,18 @@ addEventListener('keydown', e => {
 });
 const UART = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
 let reelOut = null, reelCount = -1, reelBuf = '', reelSending = false, reelQueue = [];
+let reelStep = '';   // how far connecting got, to show if it fails
 async function connectReel() {
-  const dev = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: 'BBC micro:bit' }], optionalServices: [UART] });
+  reelStep = 'picking the reel';
+  // (a micro:bit can call itself "BBC micro:bit" or "uBit")
+  const dev = await navigator.bluetooth.requestDevice({
+    filters: [{ namePrefix: 'BBC micro:bit' }, { namePrefix: 'uBit' }], optionalServices: [UART] });
   dev.addEventListener('gattserverdisconnected', () => { reelOut = null; reelStatus = 'Reel: disconnected'; });
+  reelStep = 'connecting';
   const server = await dev.gatt.connect();
+  reelStep = 'finding the message service';
   const uart = await server.getPrimaryService(UART);
+  reelStep = 'starting messages';
   // One part sends to us, one part we write to (worked out from what each one can do)
   for (const c of await uart.getCharacteristics()) {
     if (c.properties.notify || c.properties.indicate) {
@@ -2259,7 +2266,7 @@ if (navigator.bluetooth) reelBtn.style.display = '';
 reelBtn.addEventListener('click', async () => {
   reelBtn.textContent = 'Connecting…';
   try { await connectReel(); reelBtn.textContent = 'Reel connected ✓'; }
-  catch (e) { reelBtn.textContent = 'Connect reel'; msg.textContent = 'Reel: ' + e.message; }
+  catch (e) { reelBtn.textContent = 'Connect reel'; msg.textContent = 'Reel failed while ' + reelStep + ': ' + e.message; }
 });
 
 // ---------- Draw loop ----------

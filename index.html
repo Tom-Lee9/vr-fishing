@@ -29,6 +29,7 @@
   <button id="go" disabled>Loading…</button>
   <button id="reelBtn" style="display:none;background:#3a7d44">Connect reel</button>
   <p id="msg"></p>
+  <p style="font-size:12px">Version 5 (reel)</p>
   <p>Hold the screen (or headset button) to charge a cast, let go to throw it where you're looking. When the bobber gets pulled under, tap fast to hook the fish. Then hold to reel in. When the fish makes a run, stop winding and let it take line, or the line snaps. The white mark on the bar is your drag; the number shows how much line is left. Hold with no fish on to wind back in. After a catch, look at Keep or Release and tap. Look at the Aquarium button under your catch log to visit your fish. Your catch log is on your left. Two-finger tap re-centres.</p>
   <p>Joy-Cons: hold ZR or R to cast, press it to hook, spin the right stick in circles to reel, + re-centres.</p>
   <p>Buy a boat in the Aquarium's Shop, then press Y (or look at "Get in the boat" under the catch log). Push a stick to drive. Look down-left at the dashboard to get back on the jetty.</p>
@@ -706,9 +707,8 @@ let reelOut = null, reelCount = -1, reelBuf = '', reelSending = false, reelQueue
 let reelStep = '';   // how far connecting got, to show if it fails
 async function connectReel() {
   reelStep = 'picking the reel';
-  // (a micro:bit can call itself "BBC micro:bit" or "uBit")
-  const dev = await navigator.bluetooth.requestDevice({
-    filters: [{ namePrefix: 'BBC micro:bit' }, { namePrefix: 'uBit' }], optionalServices: [UART] });
+  // Show everything (a micro:bit can call itself "BBC micro:bit", "uBit" or just its 5-letter name)
+  const dev = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [UART] });
   dev.addEventListener('gattserverdisconnected', () => { reelOut = null; reelStatus = 'Reel: disconnected'; });
   reelStep = 'connecting';
   const server = await dev.gatt.connect();
